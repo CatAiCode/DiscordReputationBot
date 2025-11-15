@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 # CONFIG
 # ------------------------
 
-MIN_ACCOUNT_AGE_DAYS = 7          # Min account age to use rep commands
+MIN_ACCOUNT_AGE_DAYS = 7           # Min account age to use rep commands
 DATA_FILE = Path("rep_data.json")  # JSON file to store reputation
-PAGE_SIZE = 10                   # Users per leaderboard page
+PAGE_SIZE = 10                     # Users per leaderboard page
 
 # ------------------------
 # LOAD TOKEN FROM .env
@@ -33,7 +33,6 @@ if not TOKEN:
 # ------------------------
 
 def load_rep() -> dict:
-    """Load reputation data from JSON file."""
     if DATA_FILE.exists():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -44,12 +43,18 @@ def load_rep() -> dict:
 
 
 def save_rep(rep: dict):
-    """Save reputation data to JSON file."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(rep, f)
 
 
 reputation: dict[str, int] = load_rep()
+
+
+def set_rep(user_id: int, amount: int) -> int:
+    uid = str(user_id)
+    reputation[uid] = amount
+    save_rep(reputation)
+    return amount
 
 
 def add_rep(user_id: int, amount: int) -> int:
@@ -77,15 +82,10 @@ def meets_account_age_requirement(user: discord.abc.User) -> bool:
 
 
 # ------------------------
-# LEADERBOARD DISPLAY HELPERS
+# LEADERBOARD HELPERS
 # ------------------------
 
-def make_leaderboard_embed(
-    sorted_items: list[tuple[str, int]],
-    page: int,
-    guild: Optional[discord.Guild],
-) -> discord.Embed:
-
+def make_leaderboard_embed(sorted_items, page, guild):
     total_entries = len(sorted_items)
     total_pages = max(1, math.ceil(total_entries / PAGE_SIZE))
 
@@ -102,11 +102,9 @@ def make_leaderboard_embed(
         name = member.mention if member else f"<@{user_id}>"
         lines.append(f"**#{index}** — {name}: **{rep_amount}** rep")
 
-    description = "\n".join(lines) if lines else "📭 No reputation data yet!"
-
     embed = discord.Embed(
         title="🏆 Reputation Leaderboard",
-        description=description,
+        description="\n".join(lines) if lines else "📭 No reputation data yet!",
     )
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • Total users: {total_entries}")
     return embed
@@ -123,8 +121,8 @@ class LeaderboardView(discord.ui.View):
 
     def update_button_states(self):
         total_pages = max(1, math.ceil(len(self.sorted_items) / PAGE_SIZE))
-        prev_button: discord.ui.Button = self.children[0]  # type: ignore
-        next_button: discord.ui.Button = self.children[1]  # type: ignore
+        prev_button: discord.ui.Button = self.children[0]
+        next_button: discord.ui.Button = self.children[1]
 
         prev_button.disabled = self.current_page <= 0
         next_button.disabled = self.current_page >= total_pages - 1
@@ -132,17 +130,15 @@ class LeaderboardView(discord.ui.View):
     async def update_message(self, interaction: discord.Interaction):
         self.update_button_states()
         embed = make_leaderboard_embed(
-            self.sorted_items,
-            self.current_page,
-            interaction.guild,
+            self.sorted_items, self.current_page, interaction.guild
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def previous(self, interaction: discord.Interaction, button):
+    async def previous(self, interaction, button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message(
-                "Only the user who ran `/leaderboard` can use these buttons.",
+                "Only the user who ran the command can use these buttons.",
                 ephemeral=True,
             )
         if self.current_page > 0:
@@ -150,10 +146,10 @@ class LeaderboardView(discord.ui.View):
             await self.update_message(interaction)
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
-    async def next(self, interaction: discord.Interaction, button):
+    async def next(self, interaction, button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message(
-                "Only the user who ran `/leaderboard` can use these buttons.",
+                "Only the user who ran the command can use these buttons.",
                 ephemeral=True,
             )
         total_pages = max(1, math.ceil(len(self.sorted_items) / PAGE_SIZE))
@@ -188,50 +184,44 @@ async def on_ready():
 
 @bot.tree.command(name="rep", description="Give +1 reputation to a user.")
 @app_commands.describe(member="Who gets the rep?")
-@app_commands.checks.cooldown(1, 7200)
+@app_commands.checks.cooldown(1, 3600)
 async def rep(interaction: discord.Interaction, member: discord.Member):
+
     user = interaction.user
 
     if not meets_account_age_requirement(user):
-        age_days = (datetime.now(timezone.utc) - user.created_at).days
+        days = (datetime.now(timezone.utc) - user.created_at).days
         return await interaction.response.send_message(
-            f"❌ Your Discord account is too new.\n"
-            f"📅 Minimum age: **{MIN_ACCOUNT_AGE_DAYS} days**\n"
-            f"🕒 Your age: **{age_days} days**",
+            f"❌ Account too new. Must be **{MIN_ACCOUNT_AGE_DAYS} days** old.\n"
+            f"Your age: **{days} days**",
             ephemeral=True,
         )
 
     if member.id == user.id:
         return await interaction.response.send_message(
-            "❌ You can't give rep to yourself.",
-            ephemeral=True,
+            "❌ You can't rep yourself.", ephemeral=True
         )
 
     if member.bot:
         return await interaction.response.send_message(
-            "🤖 You can't give rep to bots.",
-            ephemeral=True,
+            "🤖 You can't rep bots.", ephemeral=True
         )
 
-    new_value = add_rep(member.id, +1)
+    new_value = add_rep(member.id, 1)
 
     await interaction.response.send_message(
-        f"👍 {user.mention} gave **+1** rep to {member.mention}!\n"
-        f"⭐ They now have **{new_value}** rep."
+        f"👍 {user.mention} gave **+1 rep** to {member.mention}!\n"
+        f"⭐ New rep: **{new_value}**"
     )
 
 
 @rep.error
 async def rep_error(interaction, error):
     if isinstance(error, app_commands.CommandOnCooldown):
-        remaining = int(error.retry_after)
-        minutes = remaining // 60
-        hours = minutes // 60
-        minutes = minutes % 60
-        time_text = f"{hours}h {minutes}m" if hours else f"{minutes}m"
-
+        secs = int(error.retry_after)
+        mins = secs // 60
         await interaction.response.send_message(
-            f"⏳ You're on cooldown. Try again in **{time_text}**.",
+            f"⏳ Cooldown: Try again in **{mins} minutes**.",
             ephemeral=True,
         )
 
@@ -240,18 +230,18 @@ async def rep_error(interaction, error):
 # /norep (-1)
 # -----------------------------------
 
-@bot.tree.command(name="norep", description="Remove 1 reputation from a user.")
+@bot.tree.command(name="norep", description="Subtract 1 reputation from a user.")
 @app_commands.describe(member="Who loses rep?")
-@app_commands.checks.cooldown(1, 7200)
+@app_commands.checks.cooldown(1, 3600)
 async def norep(interaction: discord.Interaction, member: discord.Member):
+
     user = interaction.user
 
     if not meets_account_age_requirement(user):
-        age_days = (datetime.now(timezone.utc) - user.created_at).days
+        days = (datetime.now(timezone.utc) - user.created_at).days
         return await interaction.response.send_message(
-            f"❌ Your Discord account is too new.\n"
-            f"📅 Minimum age: **{MIN_ACCOUNT_AGE_DAYS} days**\n"
-            f"🕒 Your age: **{age_days} days**",
+            f"❌ Account too new. Must be **{MIN_ACCOUNT_AGE_DAYS} days** old.\n"
+            f"Your age: **{days} days**",
             ephemeral=True,
         )
 
@@ -270,33 +260,68 @@ async def norep(interaction: discord.Interaction, member: discord.Member):
     new_value = add_rep(member.id, -1)
 
     await interaction.response.send_message(
-        f"⚠️ {user.mention} gave **-1** rep to {member.mention}.\n"
-        f"⭐ They now have **{new_value}** rep."
+        f"⚠️ {user.mention} gave **-1 rep** to {member.mention}.\n"
+        f"⭐ New rep: **{new_value}**"
     )
 
 
 @norep.error
 async def norep_error(interaction, error):
     if isinstance(error, app_commands.CommandOnCooldown):
-        remaining = int(error.retry_after)
-        minutes = remaining // 60
-        hours = minutes // 60
-        minutes = minutes % 60
-        time_text = f"{hours}h {minutes}m" if hours else f"{minutes}m"
-
+        secs = int(error.retry_after)
+        mins = secs // 60
         await interaction.response.send_message(
-            f"⏳ You're on cooldown. Try again in **{time_text}**.",
+            f"⏳ Cooldown: Try again in **{mins} minutes**.",
             ephemeral=True,
         )
+
+
+# -----------------------------------
+# /setrep (SET rep to exact amount)
+# -----------------------------------
+
+@bot.tree.command(name="setrep", description="Set a user's reputation to an exact number.")
+@app_commands.describe(
+    member="Whose rep to set?",
+    amount="The exact rep value to assign."
+)
+async def setrep(interaction: discord.Interaction, member: discord.Member, amount: int):
+
+    user = interaction.user
+
+    if member.bot:
+        return await interaction.response.send_message(
+            "🤖 You can't set rep for bots.",
+            ephemeral=True,
+        )
+
+    if user.id == member.id:
+        return await interaction.response.send_message(
+            "❌ You cannot set your own reputation.",
+            ephemeral=True,
+        )
+
+    if amount < -1000 or amount > 1000:
+        return await interaction.response.send_message(
+            "⚠️ Rep value must be between **-1000** and **1000**.",
+            ephemeral=True,
+        )
+
+    new_value = set_rep(member.id, amount)
+
+    await interaction.response.send_message(
+        f"🛠️ {user.mention} set {member.mention}'s rep to **{new_value}**."
+    )
 
 
 # -----------------------------------
 # /checkrep
 # -----------------------------------
 
-@bot.tree.command(name="checkrep", description="Check a user's rep.")
+@bot.tree.command(name="checkrep", description="Check a user's reputation.")
 @app_commands.describe(member="Whose rep to check?")
-async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+async def checkrep(interaction, member: Optional[discord.Member] = None):
+
     member = member or interaction.user
     amount = get_rep(member.id)
 
@@ -306,26 +331,26 @@ async def checkrep(interaction: discord.Interaction, member: Optional[discord.Me
 
 
 # -----------------------------------
-# /leaderboard (paged)
+# /leaderboard (Paged)
 # -----------------------------------
 
-@bot.tree.command(name="leaderboard", description="Show the reputation leaderboard with pages.")
+@bot.tree.command(name="leaderboard", description="Show the reputation leaderboard.")
 async def leaderboard(interaction: discord.Interaction):
+
     if not reputation:
         return await interaction.response.send_message(
-            "📭 No reputation data yet!",
-            ephemeral=True,
+            "📭 No rep data yet!", ephemeral=True
         )
 
     sorted_items = get_sorted_rep_items()
-    embed = make_leaderboard_embed(sorted_items, page=0, guild=interaction.guild)
+    embed = make_leaderboard_embed(sorted_items, 0, interaction.guild)
     view = LeaderboardView(sorted_items, interaction.guild, interaction.user.id)
 
     await interaction.response.send_message(embed=embed, view=view)
 
 
 # ------------------------
-# RUN BOT
+# RUN
 # ------------------------
 
 bot.run(TOKEN)
