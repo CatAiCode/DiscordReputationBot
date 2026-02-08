@@ -32,7 +32,7 @@ if not TOKEN:
 # ------------------------
 
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def init_db():
     with get_db() as conn:
@@ -65,8 +65,11 @@ def set_rep(user_id: int, amount: int) -> int:
 
 def add_rep(user_id: int, amount: int) -> int:
     with get_db() as conn:
-        cur = conn.execute("SELECT rep FROM reputation WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
+        row = conn.execute(
+            "SELECT rep FROM reputation WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+
         new_val = (row[0] if row else 0) + amount
 
         conn.execute("""
@@ -82,7 +85,10 @@ def add_rep(user_id: int, amount: int) -> int:
 
 def get_rep(user_id: int) -> int:
     with get_db() as conn:
-        row = conn.execute("SELECT rep FROM reputation WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT rep FROM reputation WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
     return row[0] if row else 0
 
 def get_sorted_rep_items():
@@ -100,10 +106,10 @@ def meets_account_age_requirement(user: discord.abc.User) -> bool:
     return account_age >= timedelta(days=MIN_ACCOUNT_AGE_DAYS)
 
 # ------------------------
-# LEADERBOARD
+# LEADERBOARD (FIXED)
 # ------------------------
 
-def make_leaderboard_embed(sorted_items, page, guild):
+async def make_leaderboard_embed(sorted_items, page, guild, bot):
     total_entries = len(sorted_items)
     total_pages = max(1, math.ceil(total_entries / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
@@ -115,7 +121,14 @@ def make_leaderboard_embed(sorted_items, page, guild):
     lines = []
     for index, (user_id, rep_amount) in enumerate(page_items, start=start + 1):
         member = guild.get_member(user_id)
-        name = member.mention if member else f"<@{user_id}>"
+
+        if not member:
+            try:
+                member = await bot.fetch_user(user_id)
+            except:
+                member = None
+
+        name = member.name if member else f"User ID {user_id}"
         lines.append(f"**#{index}** — {name}: **{rep_amount}** rep")
 
     embed = discord.Embed(
@@ -126,11 +139,12 @@ def make_leaderboard_embed(sorted_items, page, guild):
     return embed
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, sorted_items, guild, author_id):
+    def __init__(self, sorted_items, guild, author_id, bot):
         super().__init__(timeout=120)
         self.sorted_items = sorted_items
         self.guild = guild
         self.author_id = author_id
+        self.bot = bot
         self.page = 0
         self.update_buttons()
 
@@ -141,20 +155,26 @@ class LeaderboardView(discord.ui.View):
 
     async def update(self, interaction):
         self.update_buttons()
-        embed = make_leaderboard_embed(self.sorted_items, self.page, interaction.guild)
+        embed = await make_leaderboard_embed(
+            self.sorted_items, self.page, interaction.guild, self.bot
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
         if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("Not your leaderboard.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Not your leaderboard.", ephemeral=True
+            )
         self.page -= 1
         await self.update(interaction)
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("Not your leaderboard.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Not your leaderboard.", ephemeral=True
+            )
         self.page += 1
         await self.update(interaction)
 
@@ -164,6 +184,7 @@ class LeaderboardView(discord.ui.View):
 
 intents = discord.Intents.default()
 intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
@@ -181,9 +202,13 @@ async def rep(interaction, member: discord.Member):
     user = interaction.user
 
     if not meets_account_age_requirement(user):
-        return await interaction.response.send_message("❌ Account too new.", ephemeral=True)
+        return await interaction.response.send_message(
+            "❌ Account too new.", ephemeral=True
+        )
     if member.id == user.id or member.bot:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+        return await interaction.response.send_message(
+            "❌ Invalid target.", ephemeral=True
+        )
 
     new_val = add_rep(member.id, 1)
     await interaction.response.send_message(
@@ -194,7 +219,8 @@ async def rep(interaction, member: discord.Member):
 async def rep_error(interaction, error):
     if isinstance(error, app_commands.CommandOnCooldown):
         await interaction.response.send_message(
-            f"⏳ Try again in **{int(error.retry_after)}s**.", ephemeral=True
+            f"⏳ Try again in **{int(error.retry_after)}s**.",
+            ephemeral=True
         )
 
 @bot.tree.command(name="norep")
@@ -203,9 +229,13 @@ async def norep(interaction, member: discord.Member):
     user = interaction.user
 
     if not meets_account_age_requirement(user):
-        return await interaction.response.send_message("❌ Account too new.", ephemeral=True)
+        return await interaction.response.send_message(
+            "❌ Account too new.", ephemeral=True
+        )
     if member.id == user.id or member.bot:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+        return await interaction.response.send_message(
+            "❌ Invalid target.", ephemeral=True
+        )
 
     new_val = add_rep(member.id, -1)
     await interaction.response.send_message(
@@ -215,9 +245,14 @@ async def norep(interaction, member: discord.Member):
 @bot.tree.command(name="setrep")
 async def setrep(interaction, member: discord.Member, amount: int):
     if member.bot or member.id == interaction.user.id:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+        return await interaction.response.send_message(
+            "❌ Invalid target.", ephemeral=True
+        )
     if not -1000 <= amount <= 1000:
-        return await interaction.response.send_message("⚠️ Amount must be between -1000 and 1000.", ephemeral=True)
+        return await interaction.response.send_message(
+            "⚠️ Amount must be between -1000 and 1000.",
+            ephemeral=True
+        )
 
     set_rep(member.id, amount)
     await interaction.response.send_message(
@@ -235,10 +270,12 @@ async def checkrep(interaction, member: Optional[discord.Member] = None):
 async def leaderboard(interaction):
     items = get_sorted_rep_items()
     if not items:
-        return await interaction.response.send_message("📭 No rep data yet.", ephemeral=True)
+        return await interaction.response.send_message(
+            "📭 No rep data yet.", ephemeral=True
+        )
 
-    embed = make_leaderboard_embed(items, 0, interaction.guild)
-    view = LeaderboardView(items, interaction.guild, interaction.user.id)
+    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot)
+    view = LeaderboardView(items, interaction.guild, interaction.user.id, bot)
     await interaction.response.send_message(embed=embed, view=view)
 
 # ------------------------
@@ -256,7 +293,7 @@ async def importrep(interaction, file: discord.Attachment):
             try:
                 uid = int(uid)
                 rep = int(rep)
-            except Exception:
+            except:
                 continue
 
             conn.execute("""
@@ -276,7 +313,9 @@ async def importrep(interaction, file: discord.Attachment):
 @bot.tree.command(name="exportrep")
 async def exportrep(interaction):
     with get_db() as conn:
-        rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
+        rows = conn.execute(
+            "SELECT user_id, rep FROM reputation"
+        ).fetchall()
 
     data = {str(uid): rep for uid, rep in rows}
     path = "/tmp/rep_export.json"
