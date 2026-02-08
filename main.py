@@ -10,26 +10,26 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 
-# ========================
+# =========================
 # CONFIG
-# ========================
+# =========================
 
 MIN_ACCOUNT_AGE_DAYS = 7
 PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
 
-# ========================
+# =========================
 # ENV
-# ========================
+# =========================
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN missing")
 
-# ========================
+# =========================
 # SQLITE SETUP
-# ========================
+# =========================
 
 def get_db():
     return sqlite3.connect(DB_PATH)
@@ -47,9 +47,9 @@ def init_db():
 
 init_db()
 
-# ========================
+# =========================
 # DB HELPERS
-# ========================
+# =========================
 
 def set_rep(user_id: int, amount: int) -> int:
     with get_db() as conn:
@@ -90,14 +90,13 @@ def get_rep(user_id: int) -> int:
         ).fetchone()
     return row[0] if row else 0
 
-def get_sorted_rep_items(mode: str = "all"):
+def get_sorted_rep_items(mode: str):
     query = "SELECT user_id, rep FROM reputation"
     params = ()
 
     if mode == "weekly":
         query += " WHERE updated_at >= ?"
         params = ((datetime.utcnow() - timedelta(days=7)).isoformat(),)
-
     elif mode == "monthly":
         query += " WHERE updated_at >= ?"
         params = ((datetime.utcnow() - timedelta(days=30)).isoformat(),)
@@ -107,9 +106,9 @@ def get_sorted_rep_items(mode: str = "all"):
     with get_db() as conn:
         return conn.execute(query, params).fetchall()
 
-# ========================
+# =========================
 # HELPERS
-# ========================
+# =========================
 
 def meets_account_age_requirement(user: discord.abc.User) -> bool:
     return (datetime.now(timezone.utc) - user.created_at) >= timedelta(days=MIN_ACCOUNT_AGE_DAYS)
@@ -123,32 +122,34 @@ def rank_emoji(rank: int) -> str:
         return "🥉"
     return f"#{rank}"
 
-# ========================
+# =========================
 # LEADERBOARD EMBED
-# ========================
+# =========================
 
-def make_leaderboard_embed(sorted_items, page, guild, viewer_id):
-    total_entries = len(sorted_items)
+def make_leaderboard_embed(items, page, guild, viewer_id, mode):
+    total_entries = len(items)
     total_pages = max(1, math.ceil(total_entries / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
 
     start = page * PAGE_SIZE
     end = start + PAGE_SIZE
-    page_items = sorted_items[start:end]
+    page_items = items[start:end]
+
+    titles = {
+        "all": "🏆 Reputation Leaderboard — All Time",
+        "weekly": "🗓 Reputation Leaderboard — Weekly",
+        "monthly": "📅 Reputation Leaderboard — Monthly",
+    }
 
     embed = discord.Embed(
-        title="🏆 Reputation Leaderboard",
+        title=titles[mode],
         color=discord.Color.gold()
     )
-
-    if not page_items:
-        embed.description = "📭 No reputation data yet."
-        return embed
 
     viewer_rank = None
     viewer_rep = None
 
-    for idx, (uid, rep) in enumerate(sorted_items, start=1):
+    for idx, (uid, rep) in enumerate(items, start=1):
         if uid == viewer_id:
             viewer_rank = idx
             viewer_rep = rep
@@ -174,51 +175,69 @@ def make_leaderboard_embed(sorted_items, page, guild, viewer_id):
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • Total users: {total_entries}")
     return embed
 
-# ========================
-# LEADERBOARD VIEW
-# ========================
+# =========================
+# LEADERBOARD VIEW (6 BUTTONS)
+# =========================
 
 class LeaderboardView(discord.ui.View):
-    def __init__(self, sorted_items, guild, author_id):
-        super().__init__(timeout=120)
-        self.sorted_items = sorted_items
+    def __init__(self, guild, author_id):
+        super().__init__(timeout=180)
         self.guild = guild
         self.author_id = author_id
-        self.page = 0
-        self.update_buttons()
 
-    def update_buttons(self):
-        total_pages = max(1, math.ceil(len(self.sorted_items) / PAGE_SIZE))
-        self.children[0].disabled = self.page <= 0
-        self.children[1].disabled = self.page >= total_pages - 1
+        self.mode = "all"
+        self.pages = {"all": 0, "weekly": 0, "monthly": 0}
+        self.data = {
+            "all": get_sorted_rep_items("all"),
+            "weekly": get_sorted_rep_items("weekly"),
+            "monthly": get_sorted_rep_items("monthly"),
+        }
 
-    async def update(self, interaction):
-        self.update_buttons()
+    async def refresh(self, interaction):
         embed = make_leaderboard_embed(
-            self.sorted_items,
-            self.page,
-            interaction.guild,
-            interaction.user.id
+            self.data[self.mode],
+            self.pages[self.mode],
+            self.guild,
+            interaction.user.id,
+            self.mode
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="⬅ Previous", style=discord.ButtonStyle.primary)
-    async def previous(self, interaction, button):
+    @discord.ui.button(label="⬅", style=discord.ButtonStyle.primary, row=0)
+    async def prev_page(self, interaction, button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Not your leaderboard.", ephemeral=True)
-        self.page -= 1
-        await self.update(interaction)
+        if self.pages[self.mode] > 0:
+            self.pages[self.mode] -= 1
+        await self.refresh(interaction)
 
-    @discord.ui.button(label="Next ➡", style=discord.ButtonStyle.primary)
-    async def next(self, interaction, button):
+    @discord.ui.button(label="➡", style=discord.ButtonStyle.primary, row=0)
+    async def next_page(self, interaction, button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Not your leaderboard.", ephemeral=True)
-        self.page += 1
-        await self.update(interaction)
+        max_pages = max(1, math.ceil(len(self.data[self.mode]) / PAGE_SIZE))
+        if self.pages[self.mode] < max_pages - 1:
+            self.pages[self.mode] += 1
+        await self.refresh(interaction)
 
-# ========================
+    @discord.ui.button(label="🗓 Weekly", style=discord.ButtonStyle.secondary, row=1)
+    async def weekly(self, interaction, button):
+        self.mode = "weekly"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="📅 Monthly", style=discord.ButtonStyle.secondary, row=1)
+    async def monthly(self, interaction, button):
+        self.mode = "monthly"
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="🏆 All-Time", style=discord.ButtonStyle.secondary, row=1)
+    async def all_time(self, interaction, button):
+        self.mode = "all"
+        await self.refresh(interaction)
+
+# =========================
 # BOT SETUP
-# ========================
+# =========================
 
 intents = discord.Intents.default()
 intents.members = True
@@ -229,15 +248,14 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     await bot.tree.sync()
 
-# ========================
+# =========================
 # COMMANDS
-# ========================
+# =========================
 
 @bot.tree.command(name="rep")
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction, member: discord.Member):
     user = interaction.user
-
     if not meets_account_age_requirement(user):
         return await interaction.response.send_message("❌ Account too new.", ephemeral=True)
     if member.id == user.id or member.bot:
@@ -260,7 +278,6 @@ async def rep_error(interaction, error):
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction, member: discord.Member):
     user = interaction.user
-
     if not meets_account_age_requirement(user):
         return await interaction.response.send_message("❌ Account too new.", ephemeral=True)
     if member.id == user.id or member.bot:
@@ -291,35 +308,24 @@ async def checkrep(interaction, member: Optional[discord.Member] = None):
     )
 
 @bot.tree.command(name="leaderboard")
-@app_commands.describe(mode="all, weekly, or monthly")
-async def leaderboard(interaction, mode: Optional[str] = "all"):
-    mode = (mode or "all").lower()
-    if mode not in ("all", "weekly", "monthly"):
-        return await interaction.response.send_message(
-            "❌ Mode must be **all**, **weekly**, or **monthly**.",
-            ephemeral=True
-        )
-
-    items = get_sorted_rep_items(mode)
-    if not items:
-        return await interaction.response.send_message(
-            f"📭 No reputation data for **{mode}** leaderboard.",
-            ephemeral=True
-        )
-
-    embed = make_leaderboard_embed(items, 0, interaction.guild, interaction.user.id)
-    view = LeaderboardView(items, interaction.guild, interaction.user.id)
+async def leaderboard(interaction):
+    view = LeaderboardView(interaction.guild, interaction.user.id)
+    embed = make_leaderboard_embed(
+        view.data["all"],
+        0,
+        interaction.guild,
+        interaction.user.id,
+        "all"
+    )
     await interaction.response.send_message(embed=embed, view=view)
 
-# ========================
+# =========================
 # IMPORT / EXPORT
-# ========================
+# =========================
 
 @bot.tree.command(name="importrep")
 async def importrep(interaction, file: discord.Attachment):
     data = json.loads(await file.read())
-
-    inserted = 0
     with get_db() as conn:
         for uid, rep in data.items():
             try:
@@ -327,7 +333,6 @@ async def importrep(interaction, file: discord.Attachment):
                 rep = int(rep)
             except Exception:
                 continue
-
             conn.execute("""
             INSERT INTO reputation (user_id, rep, updated_at)
             VALUES (?, ?, ?)
@@ -335,31 +340,24 @@ async def importrep(interaction, file: discord.Attachment):
             DO UPDATE SET rep = excluded.rep,
                           updated_at = excluded.updated_at
             """, (uid, rep, datetime.utcnow().isoformat()))
-            inserted += 1
-
         conn.commit()
-
-    await interaction.response.send_message(
-        f"✅ Imported **{inserted}** reputation entries."
-    )
+    await interaction.response.send_message("✅ Reputation imported.")
 
 @bot.tree.command(name="exportrep")
 async def exportrep(interaction):
     with get_db() as conn:
         rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
-
     path = "/tmp/rep_export.json"
     with open(path, "w") as f:
         json.dump({str(uid): rep for uid, rep in rows}, f, indent=2)
-
     await interaction.response.send_message(
         "📦 Reputation export:",
         file=discord.File(path),
         ephemeral=True
     )
 
-# ========================
+# =========================
 # RUN
-# ========================
+# =========================
 
 bot.run(TOKEN)
