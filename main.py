@@ -177,7 +177,7 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
             inline=False
         )
 
-    # Your stats
+    # YOUR STATS
     viewer_rank = None
     viewer_rep = 0
     for i, (uid, rep) in enumerate(items, start=1):
@@ -227,8 +227,7 @@ class LeaderboardView(discord.ui.View):
     async def interaction_check(self, interaction):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "❌ This leaderboard isn’t yours.",
-                ephemeral=True
+                "❌ This leaderboard isn’t yours.", ephemeral=True
             )
             return False
         return True
@@ -261,16 +260,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    # HARD RESET slash commands to fix "....."
-    await bot.tree.clear_commands(guild=None)
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
 
 # ========================
-# COMMANDS (ALL DESCRIPTIONS SET)
+# COMMANDS
 # ========================
 
-@bot.tree.command(name="rep", description="Give +1 reputation to a member")
+@bot.tree.command(name="rep")
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
@@ -289,7 +286,7 @@ async def rep(interaction, member: discord.Member):
         f"{rating}\n\n{HELP_TEXT}"
     )
 
-@bot.tree.command(name="norep", description="Remove 1 reputation from a member")
+@bot.tree.command(name="norep")
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
@@ -308,7 +305,7 @@ async def norep(interaction, member: discord.Member):
         f"{rating}\n\n{HELP_TEXT}"
     )
 
-@bot.tree.command(name="rate", description="Rate a member from 1 to 5 stars")
+@bot.tree.command(name="rate")
 async def rate(interaction, member: discord.Member, stars: app_commands.Range[int, 1, 5]):
     if account_age_days(interaction.user) < MIN_RATING_ACCOUNT_AGE_DAYS:
         return await interaction.response.send_message("❌ Account too new.", ephemeral=True)
@@ -321,7 +318,7 @@ async def rate(interaction, member: discord.Member, stars: app_commands.Range[in
         f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
     )
 
-@bot.tree.command(name="checkrep", description="Check a user's reputation and rating")
+@bot.tree.command(name="checkrep")
 async def checkrep(interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
     rep = get_rep(member.id)
@@ -339,7 +336,7 @@ async def checkrep(interaction, member: Optional[discord.Member] = None):
         f"🎖️ **{rep} reputation**"
     )
 
-@bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
+@bot.tree.command(name="leaderboard")
 async def leaderboard(interaction):
     items = get_sorted_rep_items()
     embed = await make_leaderboard_embed(
@@ -348,7 +345,7 @@ async def leaderboard(interaction):
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="importrep", description="Import reputation data from JSON")
+@bot.tree.command(name="importrep")
 async def importrep(interaction, file: discord.Attachment):
     data = json.loads(await file.read())
     with get_db() as conn:
@@ -363,7 +360,7 @@ async def importrep(interaction, file: discord.Attachment):
         conn.commit()
     await interaction.response.send_message("✅ Reputation imported.")
 
-@bot.tree.command(name="exportrep", description="Export reputation data to JSON")
+@bot.tree.command(name="exportrep")
 async def exportrep(interaction):
     with get_db() as conn:
         rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
@@ -383,3 +380,5 @@ async def exportrep(interaction):
 # ========================
 
 bot.run(TOKEN)
+
+
