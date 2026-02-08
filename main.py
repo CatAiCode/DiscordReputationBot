@@ -64,7 +64,7 @@ def init_db():
 init_db()
 
 # ========================
-# DB HELPERS
+# DATABASE HELPERS
 # ========================
 
 def add_rep(user_id: int, amount: int) -> int:
@@ -74,7 +74,6 @@ def add_rep(user_id: int, amount: int) -> int:
             (user_id,)
         ).fetchone()
         new_val = (row[0] if row else 0) + amount
-
         conn.execute("""
         INSERT INTO reputation (user_id, rep, updated_at)
         VALUES (?, ?, ?)
@@ -120,7 +119,7 @@ def get_sorted_rep_items():
         ).fetchall()
 
 # ========================
-# UTIL
+# UTILITIES
 # ========================
 
 def account_age_days(user: discord.abc.User) -> int:
@@ -171,21 +170,35 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
             inline=False
         )
 
-    # viewer rank
+    # ---- YOUR STATS (PROMINENT) ----
     viewer_rank = None
-    viewer_rep = None
+    viewer_rep = 0
+
     for idx, (uid, rep) in enumerate(items, start=1):
         if uid == viewer_id:
             viewer_rank = idx
             viewer_rep = rep
             break
 
-    footer_extra = (
-        f" • Your rank: #{viewer_rank} • 🎖️ {viewer_rep} rep"
-        if viewer_rank else " • Your rank: Unranked"
+    viewer_avg, viewer_count = get_rating(viewer_id)
+    viewer_rating = (
+        f"{render_rating_stars(viewer_avg)} ({viewer_avg}/5 • {viewer_count} votes)"
+        if viewer_avg else "☆☆☆☆☆ (No ratings)"
     )
 
-    embed.set_footer(text=f"Page {page + 1}/{total_pages}{footer_extra}")
+    rank_text = f"#{viewer_rank}" if viewer_rank else "Unranked"
+
+    embed.add_field(
+        name="━━━━━━━━━━\n👤 Your Stats",
+        value=(
+            f"🏅 **Rank:** {rank_text}\n"
+            f"{viewer_rating}\n"
+            f"🎖️ **{viewer_rep} reputation**"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"Page {page + 1}/{total_pages}")
     return embed
 
 # ========================
@@ -289,12 +302,10 @@ async def checkrep(interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
     rep = get_rep(member.id)
     avg, count = get_rating(member.id)
-
     rating = (
         f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
         if avg else "☆☆☆☆☆ (No ratings)"
     )
-
     await interaction.response.send_message(
         f"📊 **Reputation & Rating Check**\n\n"
         f"👤 **{member.display_name}**\n"
@@ -309,7 +320,6 @@ async def leaderboard(interaction):
         return await interaction.response.send_message(
             "📭 No reputation data yet.", ephemeral=True
         )
-
     embed = await make_leaderboard_embed(
         items, 0, interaction.guild, bot, interaction.user.id
     )
@@ -335,11 +345,9 @@ async def importrep(interaction, file: discord.Attachment):
 async def exportrep(interaction):
     with get_db() as conn:
         rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
-
     path = "/tmp/rep_export.json"
     with open(path, "w") as f:
         json.dump({str(uid): rep for uid, rep in rows}, f, indent=2)
-
     await interaction.response.send_message(
         "📦 Reputation export:",
         file=discord.File(path),
