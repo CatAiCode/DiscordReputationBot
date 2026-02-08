@@ -1,7 +1,7 @@
 import json
 import math
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 import os
 
@@ -69,8 +69,12 @@ init_db()
 
 def add_rep(user_id: int, amount: int) -> int:
     with get_db() as conn:
-        row = conn.execute("SELECT rep FROM reputation WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT rep FROM reputation WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
         new_val = (row[0] if row else 0) + amount
+
         conn.execute("""
         INSERT INTO reputation (user_id, rep, updated_at)
         VALUES (?, ?, ?)
@@ -83,7 +87,10 @@ def add_rep(user_id: int, amount: int) -> int:
 
 def get_rep(user_id: int) -> int:
     with get_db() as conn:
-        row = conn.execute("SELECT rep FROM reputation WHERE user_id = ?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT rep FROM reputation WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
     return row[0] if row else 0
 
 def set_rating(rater_id: int, target_id: int, rating: int):
@@ -129,7 +136,7 @@ def render_rating_stars(avg: float) -> str:
 # LEADERBOARD EMBED
 # ========================
 
-async def make_leaderboard_embed(items, page, guild, bot):
+async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
     total_pages = max(1, math.ceil(len(items) / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
 
@@ -149,7 +156,7 @@ async def make_leaderboard_embed(items, page, guild, bot):
             except:
                 member = None
 
-        name = member.name if member else f"User ID {user_id}"
+        name = member.display_name if member else f"User ID {user_id}"
         medal = RANK_EMOJIS.get(index, f"`#{index}`")
 
         avg, count = get_rating(user_id)
@@ -164,7 +171,21 @@ async def make_leaderboard_embed(items, page, guild, bot):
             inline=False
         )
 
-    embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+    # viewer rank
+    viewer_rank = None
+    viewer_rep = None
+    for idx, (uid, rep) in enumerate(items, start=1):
+        if uid == viewer_id:
+            viewer_rank = idx
+            viewer_rep = rep
+            break
+
+    footer_extra = (
+        f" • Your rank: #{viewer_rank} • 🎖️ {viewer_rep} rep"
+        if viewer_rank else " • Your rank: Unranked"
+    )
+
+    embed.set_footer(text=f"Page {page + 1}/{total_pages}{footer_extra}")
     return embed
 
 # ========================
@@ -199,14 +220,18 @@ class LeaderboardView(discord.ui.View):
     async def previous(self, interaction, button):
         self.page -= 1
         self.update_buttons()
-        embed = await make_leaderboard_embed(self.items, self.page, self.guild, self.bot)
+        embed = await make_leaderboard_embed(
+            self.items, self.page, self.guild, self.bot, self.author_id
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         self.page += 1
         self.update_buttons()
-        embed = await make_leaderboard_embed(self.items, self.page, self.guild, self.bot)
+        embed = await make_leaderboard_embed(
+            self.items, self.page, self.guild, self.bot, self.author_id
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
 # ========================
@@ -231,7 +256,6 @@ async def on_ready():
 async def rep(interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
     new_val = add_rep(member.id, 1)
     await interaction.response.send_message(
         f"🎖️ {member.mention} now has **{new_val} reputation**"
@@ -242,7 +266,6 @@ async def rep(interaction, member: discord.Member):
 async def norep(interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
     new_val = add_rep(member.id, -1)
     await interaction.response.send_message(
         f"🎖️ {member.mention} now has **{new_val} reputation**"
@@ -254,10 +277,8 @@ async def rate(interaction, member: discord.Member, stars: app_commands.Range[in
         return await interaction.response.send_message(
             "❌ Account too new to rate.", ephemeral=True
         )
-
     set_rating(interaction.user.id, member.id, stars)
     avg, count = get_rating(member.id)
-
     await interaction.response.send_message(
         f"⭐ Rated {member.mention}\n"
         f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
@@ -276,7 +297,7 @@ async def checkrep(interaction, member: Optional[discord.Member] = None):
 
     await interaction.response.send_message(
         f"📊 **Reputation & Rating Check**\n\n"
-        f"👤 {member.mention}\n"
+        f"👤 **{member.display_name}**\n"
         f"{rating}\n"
         f"🎖️ **{rep} reputation**"
     )
@@ -289,7 +310,9 @@ async def leaderboard(interaction):
             "📭 No reputation data yet.", ephemeral=True
         )
 
-    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot)
+    embed = await make_leaderboard_embed(
+        items, 0, interaction.guild, bot, interaction.user.id
+    )
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
 
