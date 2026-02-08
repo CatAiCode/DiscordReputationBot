@@ -207,10 +207,13 @@ async def on_ready():
     await bot.tree.sync()
 
 # ------------------------
-# COMMANDS
+# COMMANDS (DESCRIPTIONS FIXED)
 # ------------------------
 
-@bot.tree.command(name="rep")
+@bot.tree.command(
+    name="rep",
+    description="Give +1 reputation to a member"
+)
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction, member: discord.Member):
     user = interaction.user
@@ -237,7 +240,10 @@ async def rep_error(interaction, error):
             ephemeral=True
         )
 
-@bot.tree.command(name="norep")
+@bot.tree.command(
+    name="norep",
+    description="Give -1 reputation to a member"
+)
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction, member: discord.Member):
     user = interaction.user
@@ -256,7 +262,10 @@ async def norep(interaction, member: discord.Member):
         f"⚠️ {user.mention} gave **-1 rep** to {member.mention}.\n⭐ New rep: **{new_val}**"
     )
 
-@bot.tree.command(name="setrep")
+@bot.tree.command(
+    name="setrep",
+    description="Set a member's reputation to a specific value"
+)
 async def setrep(interaction, member: discord.Member, amount: int):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message(
@@ -273,14 +282,20 @@ async def setrep(interaction, member: discord.Member, amount: int):
         f"🛠️ Set {member.mention}'s rep to **{amount}**."
     )
 
-@bot.tree.command(name="checkrep")
+@bot.tree.command(
+    name="checkrep",
+    description="Check your own or another member's reputation"
+)
 async def checkrep(interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
     await interaction.response.send_message(
         f"📊 {member.mention} has **{get_rep(member.id)}** rep."
     )
 
-@bot.tree.command(name="leaderboard")
+@bot.tree.command(
+    name="leaderboard",
+    description="View the reputation leaderboard"
+)
 async def leaderboard(interaction):
     items = get_sorted_rep_items()
     if not items:
@@ -292,11 +307,10 @@ async def leaderboard(interaction):
     view = LeaderboardView(items, interaction.guild, interaction.user.id, bot)
     await interaction.response.send_message(embed=embed, view=view)
 
-# ------------------------
-# IMPORT / EXPORT
-# ------------------------
-
-@bot.tree.command(name="importrep")
+@bot.tree.command(
+    name="importrep",
+    description="Import reputation data from a JSON file"
+)
 async def importrep(interaction, file: discord.Attachment):
     content = await file.read()
     data = json.loads(content)
@@ -324,7 +338,10 @@ async def importrep(interaction, file: discord.Attachment):
         f"✅ Imported **{inserted}** reputation entries."
     )
 
-@bot.tree.command(name="exportrep")
+@bot.tree.command(
+    name="exportrep",
+    description="Export the reputation database as a JSON file"
+)
 async def exportrep(interaction):
     with get_db() as conn:
         rows = conn.execute(
