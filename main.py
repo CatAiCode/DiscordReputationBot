@@ -279,7 +279,7 @@ async def rep(interaction, member: discord.Member):
     )
 
     await interaction.response.send_message(
-        f"🎖️ {member.mention} now has **{new_val} reputation**\n{rating_text}"
+        f"🎖️ {member.mention} now has **{new_val} reputation**\n{rating_text}\n\n"
         f"ℹ️ **Reminder:**\n"
         f"Use **/rep** to give reputation to a user\n"
         f"Use **/rate** to rate a user\n"
@@ -381,4 +381,5 @@ async def exportrep(interaction):
 # ========================
 
 bot.run(TOKEN)
+
 
