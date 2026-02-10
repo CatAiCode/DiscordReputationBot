@@ -134,6 +134,108 @@ def render_rating_stars(avg: float) -> str:
     return "⭐" * full + "☆" * empty
 
 # ========================
+# LEADERBOARD EMBED
+# ========================
+
+async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
+    total_pages = max(1, math.ceil(len(items) / PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+
+    embed = discord.Embed(
+        title="🏆 Reputation Leaderboard",
+        color=discord.Color.gold()
+    )
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+
+    for index, (user_id, rep) in enumerate(items[start:end], start=start + 1):
+        member = guild.get_member(user_id) or await bot.fetch_user(user_id)
+        name = member.display_name if isinstance(member, discord.Member) else member.name
+        medal = RANK_EMOJIS.get(index, f"`#{index}`")
+
+        avg, count = get_rating(user_id)
+        rating = (
+            f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
+            if avg else "☆☆☆☆☆ (No ratings)"
+        )
+
+        embed.add_field(
+            name=f"{medal} {name}",
+            value=f"{rating}\n🎖️ **{rep} reputation**",
+            inline=False
+        )
+
+    # Viewer stats
+    viewer_rank = next((i for i, (uid, _) in enumerate(items, 1) if uid == viewer_id), None)
+    viewer_rep = get_rep(viewer_id)
+    avg, count = get_rating(viewer_id)
+
+    viewer_rating = (
+        f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
+        if avg else "☆☆☆☆☆ (No ratings)"
+    )
+
+    embed.add_field(
+        name="━━━━━━━━━━\n👤 Your Stats",
+        value=(
+            f"🏅 **Rank:** {f'#{viewer_rank}' if viewer_rank else 'Unranked'}\n"
+            f"{viewer_rating}\n"
+            f"🎖️ **{viewer_rep} reputation**"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+    return embed
+
+# ========================
+# PAGINATION VIEW
+# ========================
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, items, guild, bot, author_id):
+        super().__init__(timeout=120)
+        self.items = items
+        self.guild = guild
+        self.bot = bot
+        self.author_id = author_id
+        self.page = 0
+        self.max_pages = max(1, math.ceil(len(items) / PAGE_SIZE))
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.max_pages - 1
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ You can’t control someone else’s leaderboard.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.page -= 1
+        self.update_buttons()
+        embed = await make_leaderboard_embed(
+            self.items, self.page, self.guild, self.bot, self.author_id
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        self.page += 1
+        self.update_buttons()
+        embed = await make_leaderboard_embed(
+            self.items, self.page, self.guild, self.bot, self.author_id
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+# ========================
 # BOT SETUP
 # ========================
 
@@ -150,7 +252,7 @@ async def on_ready():
 # COMMANDS
 # ========================
 
-@bot.tree.command(name="rep", description="Give +1 reputation to a member")
+@bot.tree.command(name="rep")
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
@@ -159,20 +261,15 @@ async def rep(interaction: discord.Interaction, member: discord.Member):
     new_val = add_rep(member.id, 1)
     avg, count = get_rating(member.id)
 
-    rating_text = (
-        f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
-        if avg else "☆☆☆☆☆ (No ratings)"
-    )
-
     await interaction.response.send_message(
         f"🎖️ **Reputation Given**\n\n"
         f"👤 **From:** {interaction.user.mention}\n"
         f"➡️ **To:** {member.mention}\n\n"
         f"🎖️ **New Reputation:** {new_val}\n"
-        f"{rating_text}"
+        f"{render_rating_stars(avg) if avg else '☆☆☆☆☆'} ({avg}/5 • {count} votes)"
     )
 
-@bot.tree.command(name="norep", description="Give -1 reputation to a member")
+@bot.tree.command(name="norep")
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
@@ -181,25 +278,16 @@ async def norep(interaction: discord.Interaction, member: discord.Member):
     new_val = add_rep(member.id, -1)
     avg, count = get_rating(member.id)
 
-    rating_text = (
-        f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
-        if avg else "☆☆☆☆☆ (No ratings)"
-    )
-
     await interaction.response.send_message(
         f"⚠️ **Reputation Removed**\n\n"
         f"👤 **From:** {interaction.user.mention}\n"
         f"➡️ **To:** {member.mention}\n\n"
         f"🎖️ **New Reputation:** {new_val}\n"
-        f"{rating_text}"
+        f"{render_rating_stars(avg) if avg else '☆☆☆☆☆'} ({avg}/5 • {count} votes)"
     )
 
-@bot.tree.command(name="rate", description="Rate a member from 1 to 5 stars")
-async def rate(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    stars: app_commands.Range[int, 1, 5]
-):
+@bot.tree.command(name="rate")
+async def rate(interaction: discord.Interaction, member: discord.Member, stars: app_commands.Range[int, 1, 5]):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
@@ -216,19 +304,40 @@ async def rate(
         f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
     )
 
-@bot.tree.command(name="exportrep", description="Export all reputation data to JSON")
+@bot.tree.command(name="checkrep")
+async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    member = member or interaction.user
+    rep = get_rep(member.id)
+    avg, count = get_rating(member.id)
+
+    await interaction.response.send_message(
+        f"📊 **Reputation Check**\n\n"
+        f"👤 **{member.display_name}**\n"
+        f"{render_rating_stars(avg) if avg else '☆☆☆☆☆'} ({avg}/5 • {count} votes)\n"
+        f"🎖️ **{rep} reputation**"
+    )
+
+@bot.tree.command(name="leaderboard")
+async def leaderboard(interaction: discord.Interaction):
+    items = get_sorted_rep_items()
+    if not items:
+        return await interaction.response.send_message("📭 No data yet.", ephemeral=True)
+
+    embed = await make_leaderboard_embed(
+        items, 0, interaction.guild, bot, interaction.user.id
+    )
+    view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+@bot.tree.command(name="exportrep")
 @app_commands.checks.has_permissions(administrator=True)
 async def exportrep(interaction: discord.Interaction):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT user_id, rep FROM reputation"
-        ).fetchall()
-
-    data = {str(user_id): rep for user_id, rep in rows}
+        rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
 
     path = "/tmp/reputation_export.json"
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump({str(uid): rep for uid, rep in rows}, f, indent=2)
 
     await interaction.response.send_message(
         "📦 **Reputation export complete**",
