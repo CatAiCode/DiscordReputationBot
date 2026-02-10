@@ -262,6 +262,21 @@ async def norep(interaction: discord.Interaction, member: discord.Member):
         f"{compact_stats(rep_val, neg_val)}"
     )
 
+@bot.tree.command(name="setrep", description="Set a member's reputation to a specific value")
+async def setrep(interaction: discord.Interaction, member: discord.Member, reputation: int):
+    if member.bot:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    _, neg_val = get_rep_data(member.id)
+    set_rep_data(member.id, reputation, neg_val)
+
+    rep_val, neg_val = get_rep_data(member.id)
+
+    await interaction.response.send_message(
+        f"🛠️ Reputation set by {interaction.user.mention} → {member.mention}\n"
+        f"{compact_stats(rep_val, neg_val)}"
+    )
+
 @bot.tree.command(name="checkrep", description="Check reputation status")
 async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
@@ -297,8 +312,8 @@ async def importrep(interaction: discord.Interaction, file: discord.Attachment):
             uid = int(uid_str)
 
             if isinstance(val, dict):
-                rep_val = int(val.get("rep", 0))
-                neg_val = int(val.get("neg_rep", val.get("neg", 0)))
+                rep_val = int(val.get("reputation", val.get("rep", 0)))
+                neg_val = int(val.get("negative_reputation", val.get("neg_rep", 0)))
             else:
                 rep_val = int(val)
                 neg_val = 0
@@ -324,7 +339,14 @@ async def exportrep(interaction: discord.Interaction):
         rows = conn.execute("SELECT user_id, rep, neg_rep FROM reputation").fetchall()
 
     path = "/tmp/rep_export.json"
-    payload = {str(uid): {"reputation": rep, "negative_reputation": neg} for uid, rep, neg in rows}
+    payload = {
+        str(uid): {
+            "reputation": rep,
+            "negative_reputation": neg,
+        }
+        for uid, rep, neg in rows
+    }
+
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
 
