@@ -341,7 +341,7 @@ async def leaderboard(interaction: discord.Interaction):
 @bot.tree.command(name="exportrep")
 @app_commands.checks.has_permissions(administrator=True)
 async def exportrep(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
 
     with get_db() as conn:
         rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
@@ -352,8 +352,7 @@ async def exportrep(interaction: discord.Interaction):
 
     await interaction.followup.send(
         "📦 **Reputation export complete**",
-        file=discord.File(path),
-        ephemeral=True
+        file=discord.File(path)
     )
 
 # ========================
@@ -374,7 +373,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
                 ephemeral=True
             )
         return
-
     raise error
 
 # ========================
