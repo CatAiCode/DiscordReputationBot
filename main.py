@@ -19,6 +19,10 @@ PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
 MAX_RATING = 5
 
+MAX_REP = 2000
+REP_PER_LEVEL = 20
+MAX_LEVEL = MAX_REP // REP_PER_LEVEL  # 100
+
 RANK_EMOJIS = {
     1: "🥇",
     2: "🥈",
@@ -75,6 +79,7 @@ def add_rep(user_id: int, amount: int) -> int:
         ).fetchone()
 
         new_val = (row[0] if row else 0) + amount
+        new_val = max(0, min(MAX_REP, new_val))
 
         conn.execute("""
         INSERT INTO reputation (user_id, rep, updated_at)
@@ -134,14 +139,16 @@ def render_rating_stars(avg: float) -> str:
     empty = MAX_RATING - full
     return "⭐" * full + "☆" * empty
 
-def compact_rating(avg, count, rep=None):
+def get_trading_level(rep: int) -> int:
+    return min(MAX_LEVEL, rep // REP_PER_LEVEL)
+
+def compact_stats(rep: int, avg, count):
+    level = get_trading_level(rep)
     if avg:
-        text = f"{render_rating_stars(avg)} {avg}/5 ({count})"
+        rating = f"{render_rating_stars(avg)} {avg}/5 ({count})"
     else:
-        text = "☆☆☆☆☆ No ratings"
-    if rep is not None:
-        text += f" • 🏅 {rep} Rep"
-    return text
+        rating = "☆☆☆☆☆ No ratings"
+    return f"🏅 **{rep} Rep** • 🔰 **Lv. {level}** • {rating}"
 
 # ========================
 # LEADERBOARD EMBED
@@ -171,6 +178,8 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
         medal = RANK_EMOJIS.get(index, f"`#{index}`")
 
         avg, count = get_rating(user_id)
+        level = get_trading_level(rep_amount)
+
         rating = (
             f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
             if avg else "☆☆☆☆☆ (No ratings)"
@@ -178,20 +187,17 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
 
         embed.add_field(
             name=f"{medal} {name}",
-            value=f"{rating}\n🎖️ **{rep_amount} reputation**",
+            value=(
+                f"🏅 **{rep_amount} Rep** • 🔰 **Lv. {level}**\n"
+                f"{rating}"
+            ),
             inline=False
         )
 
-    viewer_rank = None
-    viewer_rep = 0
-
-    for idx, (uid, rep) in enumerate(items, start=1):
-        if uid == viewer_id:
-            viewer_rank = idx
-            viewer_rep = rep
-            break
-
+    viewer_rep = get_rep(viewer_id)
+    viewer_level = get_trading_level(viewer_rep)
     viewer_avg, viewer_count = get_rating(viewer_id)
+
     viewer_rating = (
         f"{render_rating_stars(viewer_avg)} ({viewer_avg}/5 • {viewer_count} votes)"
         if viewer_avg else "☆☆☆☆☆ (No ratings)"
@@ -200,9 +206,8 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
     embed.add_field(
         name="━━━━━━━━━━\n👤 Your Stats",
         value=(
-            f"🏅 **Rank:** {f'#{viewer_rank}' if viewer_rank else 'Unranked'}\n"
-            f"{viewer_rating}\n"
-            f"🎖️ **{viewer_rep} reputation**"
+            f"🏅 **{viewer_rep} Rep** • 🔰 **Lv. {viewer_level}**\n"
+            f"{viewer_rating}"
         ),
         inline=False
     )
@@ -270,7 +275,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 # ========================
-# COMMANDS (2-LINE RESPONSES)
+# COMMANDS
 # ========================
 
 @bot.tree.command(name="rep", description="Give +1 reputation to a member")
@@ -284,7 +289,7 @@ async def rep(interaction: discord.Interaction, member: discord.Member):
 
     await interaction.response.send_message(
         f"🎖️ {interaction.user.mention} → {member.mention} **(+1 Rep)**\n"
-        f"{compact_rating(avg, count, new_val)}"
+        f"{compact_stats(new_val, avg, count)}"
     )
 
 @bot.tree.command(name="norep", description="Give -1 reputation to a member")
@@ -298,32 +303,27 @@ async def norep(interaction: discord.Interaction, member: discord.Member):
 
     await interaction.response.send_message(
         f"⚠️ {interaction.user.mention} → {member.mention} **(-1 Rep)**\n"
-        f"{compact_rating(avg, count, new_val)}"
+        f"{compact_stats(new_val, avg, count)}"
     )
 
 @bot.tree.command(name="rate", description="Rate a member from 1 to 5 stars")
-async def rate(
-    interaction: discord.Interaction,
-    member: discord.Member,
-    stars: app_commands.Range[int, 1, 5]
-):
+async def rate(interaction: discord.Interaction, member: discord.Member, stars: app_commands.Range[int, 1, 5]):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
     if account_age_days(interaction.user) < MIN_RATING_ACCOUNT_AGE_DAYS:
-        return await interaction.response.send_message(
-            "❌ Account too new to rate.", ephemeral=True
-        )
+        return await interaction.response.send_message("❌ Account too new to rate.", ephemeral=True)
 
     set_rating(interaction.user.id, member.id, stars)
     avg, count = get_rating(member.id)
+    rep = get_rep(member.id)
 
     await interaction.response.send_message(
         f"⭐ {interaction.user.mention} → {member.mention} **({stars}/5)**\n"
-        f"{render_rating_stars(avg)} {avg}/5 ({count} votes)"
+        f"{compact_stats(rep, avg, count)}"
     )
 
-@bot.tree.command(name="checkrep", description="Check reputation and rating")
+@bot.tree.command(name="checkrep", description="Check reputation, level, and rating")
 async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
     rep = get_rep(member.id)
@@ -331,20 +331,16 @@ async def checkrep(interaction: discord.Interaction, member: Optional[discord.Me
 
     await interaction.response.send_message(
         f"📊 {member.mention}\n"
-        f"{compact_rating(avg, count, rep)}"
+        f"{compact_stats(rep, avg, count)}"
     )
 
 @bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
 async def leaderboard(interaction: discord.Interaction):
     items = get_sorted_rep_items()
     if not items:
-        return await interaction.response.send_message(
-            "📭 No reputation data yet.", ephemeral=True
-        )
+        return await interaction.response.send_message("📭 No reputation data yet.", ephemeral=True)
 
-    embed = await make_leaderboard_embed(
-        items, 0, interaction.guild, bot, interaction.user.id
-    )
+    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
 
