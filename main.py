@@ -73,6 +73,7 @@ def add_rep(user_id: int, amount: int) -> int:
             "SELECT rep FROM reputation WHERE user_id = ?",
             (user_id,)
         ).fetchone()
+
         new_val = (row[0] if row else 0) + amount
 
         conn.execute("""
@@ -150,11 +151,20 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
     end = start + PAGE_SIZE
 
     for index, (user_id, rep) in enumerate(items[start:end], start=start + 1):
-        member = guild.get_member(user_id) or await bot.fetch_user(user_id)
-        name = member.display_name if isinstance(member, discord.Member) else member.name
-        medal = RANK_EMOJIS.get(index, f"`#{index}`")
+        member = guild.get_member(user_id)
+        if not member:
+            try:
+                member = await bot.fetch_user(user_id)
+            except:
+                member = None
 
+        name = member.display_name if isinstance(member, discord.Member) else (
+            member.name if member else f"User ID {user_id}"
+        )
+
+        medal = RANK_EMOJIS.get(index, f"`#{index}`")
         avg, count = get_rating(user_id)
+
         rating = (
             f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
             if avg else "☆☆☆☆☆ (No ratings)"
@@ -166,7 +176,6 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
             inline=False
         )
 
-    # Viewer stats
     viewer_rank = next((i for i, (uid, _) in enumerate(items, 1) if uid == viewer_id), None)
     viewer_rep = get_rep(viewer_id)
     avg, count = get_rating(viewer_id)
@@ -332,6 +341,8 @@ async def leaderboard(interaction: discord.Interaction):
 @bot.tree.command(name="exportrep")
 @app_commands.checks.has_permissions(administrator=True)
 async def exportrep(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
     with get_db() as conn:
         rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
 
@@ -339,11 +350,32 @@ async def exportrep(interaction: discord.Interaction):
     with open(path, "w", encoding="utf-8") as f:
         json.dump({str(uid): rep for uid, rep in rows}, f, indent=2)
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         "📦 **Reputation export complete**",
         file=discord.File(path),
         ephemeral=True
     )
+
+# ========================
+# GLOBAL ERROR HANDLER
+# ========================
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ You do not have permission to use this command.",
+                ephemeral=True
+            )
+        return
+
+    raise error
 
 # ========================
 # RUN
