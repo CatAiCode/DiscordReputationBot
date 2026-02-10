@@ -1,7 +1,7 @@
 import json
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 import os
 
@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 
 PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
-REP_PER_LEVEL = 20  # uncapped
+
+REP_PER_LEVEL = 20  # 20 rep = 1 level (uncapped)
 
 RANK_EMOJIS = {
     1: "🥇",
@@ -34,40 +35,21 @@ if not TOKEN:
     raise ValueError("DISCORD_TOKEN missing")
 
 # ========================
-# SQLITE SETUP + SAFE MIGRATION
+# SQLITE SETUP
 # ========================
 
 def get_db():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def column_exists(conn, table, column):
-    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return any(col[1] == column for col in cols)
-
 def init_db():
     with get_db() as conn:
-        # Base table
         conn.execute("""
         CREATE TABLE IF NOT EXISTS reputation (
             user_id INTEGER PRIMARY KEY,
-            rep INTEGER DEFAULT 0,
+            rep INTEGER NOT NULL,
             updated_at TEXT
         )
         """)
-
-        # Add columns safely
-        if not column_exists(conn, "reputation", "rep_up"):
-            conn.execute("ALTER TABLE reputation ADD COLUMN rep_up INTEGER DEFAULT 0")
-        if not column_exists(conn, "reputation", "rep_down"):
-            conn.execute("ALTER TABLE reputation ADD COLUMN rep_down INTEGER DEFAULT 0")
-
-        # Migrate old rep → rep_up (one-time safe)
-        conn.execute("""
-        UPDATE reputation
-        SET rep_up = rep
-        WHERE rep_up = 0 AND rep > 0
-        """)
-
         conn.commit()
 
 init_db()
@@ -76,84 +58,92 @@ init_db()
 # DATABASE HELPERS
 # ========================
 
-def add_rep_up(user_id: int):
-    with get_db() as conn:
-        conn.execute("""
-        INSERT INTO reputation (user_id, rep_up, rep_down, updated_at)
-        VALUES (?, 1, 0, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET
-            rep_up = rep_up + 1,
-            updated_at = excluded.updated_at
-        """, (user_id, datetime.utcnow().isoformat()))
-        conn.commit()
-
-def add_rep_down(user_id: int):
-    with get_db() as conn:
-        conn.execute("""
-        INSERT INTO reputation (user_id, rep_up, rep_down, updated_at)
-        VALUES (?, 0, 1, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET
-            rep_down = rep_down + 1,
-            updated_at = excluded.updated_at
-        """, (user_id, datetime.utcnow().isoformat()))
-        conn.commit()
-
-def get_rep(user_id: int):
+def add_rep(user_id: int, amount: int) -> int:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT rep_up, rep_down FROM reputation WHERE user_id = ?",
+            "SELECT rep FROM reputation WHERE user_id = ?",
             (user_id,)
         ).fetchone()
-    return row if row else (0, 0)
+
+        new_val = (row[0] if row else 0) + amount
+        new_val = max(0, new_val)  # prevent negative rep
+
+        conn.execute("""
+        INSERT INTO reputation (user_id, rep, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET rep = excluded.rep,
+                      updated_at = excluded.updated_at
+        """, (user_id, new_val, datetime.utcnow().isoformat()))
+        conn.commit()
+
+    return new_val
+
+def get_rep(user_id: int) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT rep FROM reputation WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+    return row[0] if row else 0
 
 def get_sorted_rep_items():
     with get_db() as conn:
-        return conn.execute("""
-        SELECT user_id, rep_up, rep_down
-        FROM reputation
-        ORDER BY rep_up DESC
-        """).fetchall()
+        return conn.execute(
+            "SELECT user_id, rep FROM reputation ORDER BY rep DESC"
+        ).fetchall()
 
 # ========================
 # UTILITIES
 # ========================
 
-def get_trading_level(rep_up: int) -> int:
-    return rep_up // REP_PER_LEVEL
+def get_trading_level(rep: int) -> int:
+    return rep // REP_PER_LEVEL  # uncapped
 
-def compact_stats(rep_up: int, rep_down: int):
-    return f"👍 **{rep_up}** • 👎 **{rep_down}** • 🔰 **Lv. {get_trading_level(rep_up)}**"
+def compact_stats(rep: int):
+    level = get_trading_level(rep)
+    return f"🏅 **{rep} Rep** • 🔰 **Lv. {level}**"
 
 # ========================
-# LEADERBOARD EMBED (PAGINATED)
+# LEADERBOARD EMBED
 # ========================
 
-async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
+async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
     total_pages = max(1, math.ceil(len(items) / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
 
-    embed = discord.Embed(title="🏆 Reputation Leaderboard", color=discord.Color.gold())
+    embed = discord.Embed(
+        title="🏆 Reputation Leaderboard",
+        color=discord.Color.gold()
+    )
 
     start = page * PAGE_SIZE
     end = start + PAGE_SIZE
 
-    for idx, (uid, up, down) in enumerate(items[start:end], start=start + 1):
-        member = guild.get_member(uid) or await bot.fetch_user(uid)
-        name = member.display_name if hasattr(member, "display_name") else member.name
-        medal = RANK_EMOJIS.get(idx, f"`#{idx}`")
+    for index, (user_id, rep_amount) in enumerate(items[start:end], start=start + 1):
+        member = guild.get_member(user_id)
+        if not member:
+            try:
+                member = await bot.fetch_user(user_id)
+            except:
+                member = None
+
+        name = member.display_name if member else f"User ID {user_id}"
+        medal = RANK_EMOJIS.get(index, f"`#{index}`")
+        level = get_trading_level(rep_amount)
 
         embed.add_field(
             name=f"{medal} {name}",
-            value=compact_stats(up, down),
+            value=f"🏅 **{rep_amount} Rep** • 🔰 **Lv. {level}**",
             inline=False
         )
 
-    viewer_up, viewer_down = get_rep(viewer_id)
+    viewer_rep = get_rep(viewer_id)
+    viewer_level = get_trading_level(viewer_rep)
+
     embed.add_field(
         name="━━━━━━━━━━\n👤 Your Stats",
-        value=compact_stats(viewer_up, viewer_down),
+        value=f"🏅 **{viewer_rep} Rep** • 🔰 **Lv. {viewer_level}**",
         inline=False
     )
 
@@ -161,7 +151,7 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id):
     return embed
 
 # ========================
-# PAGINATION VIEW (UNCHANGED)
+# PAGINATION VIEW
 # ========================
 
 class LeaderboardView(discord.ui.View):
@@ -172,13 +162,26 @@ class LeaderboardView(discord.ui.View):
         self.bot = bot
         self.author_id = author_id
         self.page = 0
+        self.max_pages = max(1, math.ceil(len(items) / PAGE_SIZE))
+        self.update_buttons()
 
-    async def interaction_check(self, interaction):
-        return interaction.user.id == self.author_id
+    def update_buttons(self):
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.max_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ You can’t control someone else’s leaderboard.",
+                ephemeral=True
+            )
+            return False
+        return True
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
     async def previous(self, interaction, button):
         self.page -= 1
+        self.update_buttons()
         embed = await make_leaderboard_embed(
             self.items, self.page, self.guild, self.bot, self.author_id
         )
@@ -187,6 +190,7 @@ class LeaderboardView(discord.ui.View):
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
         self.page += 1
+        self.update_buttons()
         embed = await make_leaderboard_embed(
             self.items, self.page, self.guild, self.bot, self.author_id
         )
@@ -206,66 +210,83 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 # ========================
-# COMMANDS (UNCHANGED NAMES)
+# COMMANDS
 # ========================
 
-@bot.tree.command(name="rep")
+@bot.tree.command(name="rep", description="Give +1 reputation to a member")
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
-    add_rep_up(member.id)
-    up, down = get_rep(member.id)
+    new_val = add_rep(member.id, 1)
 
     await interaction.response.send_message(
-        f"👍 {interaction.user.mention} → {member.mention}\n"
-        f"{compact_stats(up, down)}"
+        f"🎖️ {interaction.user.mention} → {member.mention} **(+1 Rep)**\n"
+        f"{compact_stats(new_val)}"
     )
 
-@bot.tree.command(name="norep")
+@bot.tree.command(name="norep", description="Give -1 reputation to a member")
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
-    add_rep_down(member.id)
-    up, down = get_rep(member.id)
+    new_val = add_rep(member.id, -1)
 
     await interaction.response.send_message(
-        f"👎 {interaction.user.mention} → {member.mention}\n"
-        f"{compact_stats(up, down)}"
+        f"⚠️ {interaction.user.mention} → {member.mention} **(-1 Rep)**\n"
+        f"{compact_stats(new_val)}"
     )
 
-@bot.tree.command(name="checkrep")
+@bot.tree.command(name="checkrep", description="Check reputation and trading level")
 async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
-    up, down = get_rep(member.id)
+    rep = get_rep(member.id)
 
     await interaction.response.send_message(
         f"📊 {member.mention}\n"
-        f"{compact_stats(up, down)}"
+        f"{compact_stats(rep)}"
     )
 
-@bot.tree.command(name="leaderboard")
+@bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
 async def leaderboard(interaction: discord.Interaction):
     items = get_sorted_rep_items()
-    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
+    if not items:
+        return await interaction.response.send_message(
+            "📭 No reputation data yet.", ephemeral=True
+        )
+
+    embed = await make_leaderboard_embed(
+        items, 0, interaction.guild, bot, interaction.user.id
+    )
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="exportrep")
+@bot.tree.command(name="importrep", description="Import reputation from JSON")
+async def importrep(interaction: discord.Interaction, file: discord.Attachment):
+    data = json.loads(await file.read())
+    with get_db() as conn:
+        for uid, rep in data.items():
+            conn.execute("""
+            INSERT INTO reputation (user_id, rep, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id)
+            DO UPDATE SET rep = excluded.rep,
+                          updated_at = excluded.updated_at
+            """, (int(uid), int(rep), datetime.utcnow().isoformat()))
+        conn.commit()
+
+    await interaction.response.send_message("✅ Reputation imported.")
+
+@bot.tree.command(name="exportrep", description="Export reputation to JSON")
 async def exportrep(interaction: discord.Interaction):
     with get_db() as conn:
-        rows = conn.execute("SELECT user_id, rep_up, rep_down FROM reputation").fetchall()
+        rows = conn.execute("SELECT user_id, rep FROM reputation").fetchall()
 
     path = "/tmp/rep_export.json"
     with open(path, "w") as f:
-        json.dump(
-            {str(uid): {"up": up, "down": down} for uid, up, down in rows},
-            f,
-            indent=2
-        )
+        json.dump({str(uid): rep for uid, rep in rows}, f, indent=2)
 
     await interaction.response.send_message(
         "📦 Reputation export:",
