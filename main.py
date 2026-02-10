@@ -16,8 +16,7 @@ from dotenv import load_dotenv
 
 PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
-
-REP_PER_LEVEL = 20  # uncapped: level = rep // 20
+REP_PER_LEVEL = 20  # uncapped levels
 
 RANK_EMOJIS = {
     1: "🥇",
@@ -52,10 +51,11 @@ def init_db():
         """)
         conn.commit()
 
-        # ---- MIGRATION: add neg_rep column if missing ----
         cols = [r[1] for r in conn.execute("PRAGMA table_info(reputation)").fetchall()]
         if "neg_rep" not in cols:
-            conn.execute("ALTER TABLE reputation ADD COLUMN neg_rep INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE reputation ADD COLUMN neg_rep INTEGER NOT NULL DEFAULT 0"
+            )
             conn.commit()
 
 init_db()
@@ -72,8 +72,7 @@ def get_rep_data(user_id: int) -> tuple[int, int]:
         ).fetchone()
     return (row[0], row[1]) if row else (0, 0)
 
-def set_rep_data(user_id: int, rep: int, neg_rep: int) -> None:
-    # Keep rep non-negative; neg_rep non-negative
+def set_rep_data(user_id: int, rep: int, neg_rep: int):
     rep = max(0, rep)
     neg_rep = max(0, neg_rep)
 
@@ -88,21 +87,19 @@ def set_rep_data(user_id: int, rep: int, neg_rep: int) -> None:
         """, (user_id, rep, neg_rep, datetime.utcnow().isoformat()))
         conn.commit()
 
-def add_positive_rep(user_id: int, amount: int = 1) -> tuple[int, int]:
+def add_positive_rep(user_id: int, amount: int = 1):
     rep, neg = get_rep_data(user_id)
     rep += amount
     set_rep_data(user_id, rep, neg)
     return rep, neg
 
-def add_negative_rep(user_id: int, amount: int = 1) -> tuple[int, int]:
-    # IMPORTANT: does NOT subtract rep; only increments neg_rep
+def add_negative_rep(user_id: int, amount: int = 1):
     rep, neg = get_rep_data(user_id)
     neg += amount
     set_rep_data(user_id, rep, neg)
     return rep, neg
 
 def get_sorted_rep_items():
-    # Sort by positive rep desc (your original behavior), then neg asc as a tiebreaker
     with get_db() as conn:
         return conn.execute(
             "SELECT user_id, rep, neg_rep FROM reputation ORDER BY rep DESC, neg_rep ASC"
@@ -113,11 +110,15 @@ def get_sorted_rep_items():
 # ========================
 
 def get_trading_level(rep: int) -> int:
-    return rep // REP_PER_LEVEL  # uncapped
+    return rep // REP_PER_LEVEL
 
 def compact_stats(rep: int, neg: int) -> str:
     level = get_trading_level(rep)
-    return f"👍 **{rep} Rep** • 👎 **{neg} Neg** • 🔰 **Lv. {level}**"
+    return (
+        f"👍 **{rep} Reputation** • "
+        f"👎 **{neg} Negative Reputation** • "
+        f"🔰 **Lv. {level}**"
+    )
 
 # ========================
 # LEADERBOARD EMBED
@@ -152,9 +153,8 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
             inline=False,
         )
 
-    # ---- YOUR STATS (kept from your original) ----
     viewer_rank = None
-    for idx, (uid, _rep, _neg) in enumerate(items, start=1):
+    for idx, (uid, _, _) in enumerate(items, start=1):
         if uid == viewer_id:
             viewer_rank = idx
             break
@@ -174,7 +174,7 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
     return embed
 
 # ========================
-# PAGINATION VIEW (RESTORED)
+# PAGINATION VIEW
 # ========================
 
 class LeaderboardView(discord.ui.View):
@@ -233,36 +233,36 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 # ========================
-# COMMANDS (2-LINE RESPONSES)
+# COMMANDS
 # ========================
 
-@bot.tree.command(name="rep", description="Give +1 reputation to a member")
+@bot.tree.command(name="rep", description="Give positive reputation")
 @app_commands.checks.cooldown(1, 240)
 async def rep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
-    rep_val, neg_val = add_positive_rep(member.id, 1)
+    rep_val, neg_val = add_positive_rep(member.id)
 
     await interaction.response.send_message(
-        f"🎖️ {interaction.user.mention} → {member.mention} **(+Rep)**\n"
+        f"🎖️ {interaction.user.mention} → {member.mention} **(+Reputation)**\n"
         f"{compact_stats(rep_val, neg_val)}"
     )
 
-@bot.tree.command(name="norep", description="Give negative rep (records Neg Rep; does not remove Rep)")
+@bot.tree.command(name="norep", description="Give negative reputation (does not remove reputation)")
 @app_commands.checks.cooldown(1, 240)
 async def norep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
-    rep_val, neg_val = add_negative_rep(member.id, 1)
+    rep_val, neg_val = add_negative_rep(member.id)
 
     await interaction.response.send_message(
-        f"⚠️ {interaction.user.mention} → {member.mention} **(+Neg)**\n"
+        f"⚠️ {interaction.user.mention} → {member.mention} **(+Negative Reputation)**\n"
         f"{compact_stats(rep_val, neg_val)}"
     )
 
-@bot.tree.command(name="checkrep", description="Check reputation, negative rep, and trading level")
+@bot.tree.command(name="checkrep", description="Check reputation status")
 async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
     rep_val, neg_val = get_rep_data(member.id)
@@ -276,25 +276,22 @@ async def checkrep(interaction: discord.Interaction, member: Optional[discord.Me
 async def leaderboard(interaction: discord.Interaction):
     items = get_sorted_rep_items()
     if not items:
-        return await interaction.response.send_message("📭 No reputation data yet.", ephemeral=True)
+        return await interaction.response.send_message(
+            "📭 No reputation data yet.", ephemeral=True
+        )
 
     embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
 
 # ========================
-# IMPORT / EXPORT (RESTORED + BACKCOMPAT)
+# IMPORT / EXPORT
 # ========================
 
 @bot.tree.command(name="importrep", description="Import reputation from JSON")
 async def importrep(interaction: discord.Interaction, file: discord.Attachment):
-    raw = await file.read()
-    data = json.loads(raw)
+    data = json.loads(await file.read())
 
-    # Back-compat formats supported:
-    # 1) {"123": 10, "456": 50}  -> rep only
-    # 2) {"123": {"rep": 10, "neg_rep": 2}, ...}
-    # 3) {"123": {"rep": 10, "neg": 2}, ...}  (loose key)
     with get_db() as conn:
         for uid_str, val in data.items():
             uid = int(uid_str)
@@ -327,11 +324,10 @@ async def exportrep(interaction: discord.Interaction):
         rows = conn.execute("SELECT user_id, rep, neg_rep FROM reputation").fetchall()
 
     path = "/tmp/rep_export.json"
-    payload = {str(uid): {"rep": rep, "neg_rep": neg} for uid, rep, neg in rows}
+    payload = {str(uid): {"reputation": rep, "negative_reputation": neg} for uid, rep, neg in rows}
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
 
-    # Kept as ephemeral=True like your earlier version
     await interaction.response.send_message(
         "📦 Reputation export:",
         file=discord.File(path),
