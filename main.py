@@ -216,58 +216,25 @@ async def rate(
         f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
     )
 
-@bot.tree.command(name="checkrep", description="Check reputation and rating")
-async def checkrep(
-    interaction: discord.Interaction,
-    member: Optional[discord.Member] = None
-):
-    member = member or interaction.user
-    rep = get_rep(member.id)
-    avg, count = get_rating(member.id)
+@bot.tree.command(name="exportrep", description="Export all reputation data to JSON")
+@app_commands.checks.has_permissions(administrator=True)
+async def exportrep(interaction: discord.Interaction):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, rep FROM reputation"
+        ).fetchall()
 
-    rating = (
-        f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
-        if avg else "☆☆☆☆☆ (No ratings)"
-    )
+    data = {str(user_id): rep for user_id, rep in rows}
+
+    path = "/tmp/reputation_export.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
     await interaction.response.send_message(
-        f"📊 **Reputation & Rating Check**\n\n"
-        f"👤 **{member.display_name}**\n"
-        f"{rating}\n"
-        f"🎖️ **{rep} reputation**"
+        "📦 **Reputation export complete**",
+        file=discord.File(path),
+        ephemeral=True
     )
-
-@bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
-async def leaderboard(interaction: discord.Interaction):
-    items = get_sorted_rep_items()
-    if not items:
-        return await interaction.response.send_message(
-            "📭 No reputation data yet.", ephemeral=True
-        )
-
-    embed = discord.Embed(
-        title="🏆 Reputation Leaderboard",
-        color=discord.Color.gold()
-    )
-
-    for index, (user_id, rep) in enumerate(items[:10], start=1):
-        member = interaction.guild.get_member(user_id)
-        name = member.display_name if member else f"User ID {user_id}"
-        medal = RANK_EMOJIS.get(index, f"`#{index}`")
-        avg, count = get_rating(user_id)
-
-        rating = (
-            f"{render_rating_stars(avg)} ({avg}/5 • {count} votes)"
-            if avg else "☆☆☆☆☆ (No ratings)"
-        )
-
-        embed.add_field(
-            name=f"{medal} {name}",
-            value=f"{rating}\n🎖️ **{rep} reputation**",
-            inline=False
-        )
-
-    await interaction.response.send_message(embed=embed)
 
 # ========================
 # RUN
