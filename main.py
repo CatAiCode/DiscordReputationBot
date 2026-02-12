@@ -277,6 +277,21 @@ async def setrep(interaction: discord.Interaction, member: discord.Member, reput
         f"{compact_stats(rep_val, neg_val)}"
     )
 
+@bot.tree.command(name="setnegativerep", description="Set a member's negative reputation to a specific value")
+async def setnegativerep(interaction: discord.Interaction, member: discord.Member, negative_reputation: int):
+    if member.bot:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    rep_val, _ = get_rep_data(member.id)
+    set_rep_data(member.id, rep_val, negative_reputation)
+
+    rep_val, neg_val = get_rep_data(member.id)
+
+    await interaction.response.send_message(
+        f"🛠️ Negative Reputation set by {interaction.user.mention} → {member.mention}\n"
+        f"{compact_stats(rep_val, neg_val)}"
+    )
+
 @bot.tree.command(name="checkrep", description="Check reputation status")
 async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     member = member or interaction.user
