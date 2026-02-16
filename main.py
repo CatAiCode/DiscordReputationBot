@@ -112,11 +112,11 @@ def get_sorted_rep_items():
 def get_trading_level(rep: int) -> int:
     return rep // REP_PER_LEVEL
 
+# 🔥 UPDATED — negative rep removed from display
 def compact_stats(rep: int, neg: int) -> str:
     level = get_trading_level(rep)
     return (
         f"👍 **{rep} Reputation** • "
-        f"👎 **{neg} Negative Reputation** • "
         f"🔰 **Lv. {level}**"
     )
 
