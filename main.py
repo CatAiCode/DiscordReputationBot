@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
-REP_PER_LEVEL = 20  # uncapped levels
+REP_PER_LEVEL = 20
 MAX_REP_PER_TARGET_PER_24H = 3
 REP_HISTORY_PAGE_SIZE = 15
 
@@ -40,10 +40,14 @@ if not TOKEN:
 # ========================
 
 def get_db():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
     with get_db() as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+
         conn.execute("""
         CREATE TABLE IF NOT EXISTS reputation (
             user_id INTEGER PRIMARY KEY,
@@ -76,6 +80,9 @@ init_db()
 # DATABASE HELPERS
 # ========================
 
+def utc_now_iso():
+    return datetime.utcnow().isoformat()
+
 def get_rep_data(user_id: int) -> tuple[int, int]:
     with get_db() as conn:
         row = conn.execute(
@@ -96,7 +103,7 @@ def set_rep_data(user_id: int, rep: int, neg_rep: int):
         DO UPDATE SET rep = excluded.rep,
                       neg_rep = excluded.neg_rep,
                       updated_at = excluded.updated_at
-        """, (user_id, rep, neg_rep, datetime.utcnow().isoformat()))
+        """, (user_id, rep, neg_rep, utc_now_iso()))
         conn.commit()
 
 def add_positive_rep(user_id: int, amount: int = 1):
@@ -114,7 +121,11 @@ def add_negative_rep(user_id: int, amount: int = 1):
 def get_sorted_rep_items():
     with get_db() as conn:
         return conn.execute(
-            "SELECT user_id, rep, neg_rep FROM reputation ORDER BY rep DESC, neg_rep ASC"
+            """
+            SELECT user_id, rep, neg_rep
+            FROM reputation
+            ORDER BY rep DESC, neg_rep ASC, user_id ASC
+            """
         ).fetchall()
 
 def get_rep_count_last_24h(giver_id: int, receiver_id: int) -> int:
@@ -132,7 +143,7 @@ def log_rep_action(giver_id: int, receiver_id: int):
         conn.execute("""
             INSERT INTO rep_history (giver_id, receiver_id, given_at)
             VALUES (?, ?, ?)
-        """, (giver_id, receiver_id, datetime.utcnow().isoformat()))
+        """, (giver_id, receiver_id, utc_now_iso()))
         conn.commit()
 
 def can_give_rep(giver_id: int, receiver_id: int) -> tuple[bool, int]:
@@ -159,16 +170,13 @@ def get_trading_level(rep: int) -> int:
 
 def compact_stats(rep: int, neg: int) -> str:
     level = get_trading_level(rep)
-    return (
-        f"👍 **{rep} Reputation** • "
-        f"🔰 **Lv. {level}**"
-    )
+    return f"👍 **{rep} Reputation** • 🔰 **Lv. {level}**"
 
 def format_dt(dt_str: str) -> str:
     try:
         dt = datetime.fromisoformat(dt_str)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    except:
+    except Exception:
         return dt_str
 
 async def resolve_user_name(guild: discord.Guild, bot: commands.Bot, user_id: int) -> str:
@@ -179,7 +187,7 @@ async def resolve_user_name(guild: discord.Guild, bot: commands.Bot, user_id: in
     try:
         user = await bot.fetch_user(user_id)
         return user.name
-    except:
+    except Exception:
         return f"User {user_id}"
 
 def build_rep_history_table(rows):
@@ -215,7 +223,7 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
         if not member:
             try:
                 member = await bot.fetch_user(user_id)
-            except:
+            except Exception:
                 member = None
 
         name = member.display_name if member else f"User ID {user_id}"
@@ -248,7 +256,7 @@ async def make_leaderboard_embed(items, page, guild, bot, viewer_id: int):
     return embed
 
 # ========================
-# PAGINATION VIEW
+# PAGINATION VIEWS
 # ========================
 
 class LeaderboardView(discord.ui.View):
@@ -293,167 +301,6 @@ class LeaderboardView(discord.ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-# ========================
-# BOT SETUP
-# ========================
-
-intents = discord.Intents.default()
-intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-@bot.event
-async def on_ready():
-    await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
-
-# ========================
-# COMMANDS
-# ========================
-
-@bot.tree.command(name="rep", description="Give positive reputation")
-@app_commands.checks.cooldown(1, 240)
-async def rep(interaction: discord.Interaction, member: discord.Member):
-    if member.bot or member.id == interaction.user.id:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
-    allowed, remaining = can_give_rep(interaction.user.id, member.id)
-    if not allowed:
-        return await interaction.response.send_message(
-            f"❌ You have already given {member.mention} reputation "
-            f"**{MAX_REP_PER_TARGET_PER_24H} times in the last 24 hours**.\n"
-            f"Please wait before repping this user again.",
-            ephemeral=True,
-        )
-
-    rep_val, neg_val = add_positive_rep(member.id)
-    log_rep_action(interaction.user.id, member.id)
-
-    used_now = get_rep_count_last_24h(interaction.user.id, member.id)
-    left_now = max(0, MAX_REP_PER_TARGET_PER_24H - used_now)
-
-    await interaction.response.send_message(
-        f"🎖️ {interaction.user.mention} → {member.mention} **(+Reputation)**\n"
-        f"{compact_stats(rep_val, neg_val)}\n"
-        f"🕒 You have used **{used_now}/{MAX_REP_PER_TARGET_PER_24H}** reps for this user in the last 24 hours "
-        f"({left_now} left)."
-    )
-
-@bot.tree.command(name="norep", description="Give negative reputation (does not remove reputation)")
-@app_commands.checks.cooldown(1, 240)
-async def norep(interaction: discord.Interaction, member: discord.Member):
-    if member.bot or member.id == interaction.user.id:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
-    rep_val, neg_val = add_negative_rep(member.id)
-
-    await interaction.response.send_message(
-        f"⚠️ {interaction.user.mention} → {member.mention} **(+Negative Reputation)**\n"
-        f"{compact_stats(rep_val, neg_val)}"
-    )
-
-@bot.tree.command(name="setrep", description="Set a member's reputation to a specific value")
-async def setrep(interaction: discord.Interaction, member: discord.Member, reputation: int):
-    if member.bot:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
-    _, neg_val = get_rep_data(member.id)
-    set_rep_data(member.id, reputation, neg_val)
-
-    rep_val, neg_val = get_rep_data(member.id)
-
-    await interaction.response.send_message(
-        f"🛠️ Reputation set by {interaction.user.mention} → {member.mention}\n"
-        f"{compact_stats(rep_val, neg_val)}"
-    )
-
-@bot.tree.command(name="setnegativerep", description="Set a member's negative reputation to a specific value")
-async def setnegativerep(interaction: discord.Interaction, member: discord.Member, negative_reputation: int):
-    if member.bot:
-        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
-
-    rep_val, _ = get_rep_data(member.id)
-    set_rep_data(member.id, rep_val, negative_reputation)
-
-    rep_val, neg_val = get_rep_data(member.id)
-
-    await interaction.response.send_message(
-        f"🛠️ Negative Reputation set by {interaction.user.mention} → {member.mention}\n"
-        f"{compact_stats(rep_val, neg_val)}"
-    )
-
-@bot.tree.command(name="checkrep", description="Check reputation status")
-async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    member = member or interaction.user
-    rep_val, neg_val = get_rep_data(member.id)
-
-    await interaction.response.send_message(
-        f"📊 {member.mention}\n"
-        f"{compact_stats(rep_val, neg_val)}"
-    )
-
-@bot.tree.command(name="rephistory", description="View all positive rep history received by a member")
-async def rephistory(interaction: discord.Interaction, member: discord.Member):
-    rows = get_received_rep_history(member.id)
-
-    if not rows:
-        return await interaction.response.send_message(
-            f"📭 {member.mention} has not received any positive reputation yet.",
-            ephemeral=True,
-        )
-
-    formatted_rows = []
-    for giver_id, receiver_id, given_at in rows:
-        giver_name = await resolve_user_name(interaction.guild, bot, giver_id)
-        formatted_rows.append((giver_name, format_dt(given_at)))
-
-    chunks = [
-        formatted_rows[i:i + REP_HISTORY_PAGE_SIZE]
-        for i in range(0, len(formatted_rows), REP_HISTORY_PAGE_SIZE)
-    ]
-
-    first_table = build_rep_history_table(chunks[0])
-
-    embed = discord.Embed(
-        title=f"📜 Reputation History for {member.display_name}",
-        description=(
-            f"Showing positive reputation received by {member.mention}\n"
-            f"Entries: **{len(formatted_rows)}**"
-        ),
-        color=discord.Color.blurple(),
-    )
-    embed.add_field(
-        name=f"Page 1/{len(chunks)}",
-        value=first_table,
-        inline=False,
-    )
-
-    if len(chunks) == 1:
-        return await interaction.response.send_message(embed=embed)
-
-    view = RepHistoryView(
-        member=member,
-        pages=chunks,
-        guild=interaction.guild,
-        bot=bot,
-        author_id=interaction.user.id,
-    )
-    await interaction.response.send_message(embed=embed, view=view)
-
-@bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
-async def leaderboard(interaction: discord.Interaction):
-    items = get_sorted_rep_items()
-    if not items:
-        return await interaction.response.send_message(
-            "📭 No reputation data yet.", ephemeral=True
-        )
-
-    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
-    view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
-
-# ========================
-# REP HISTORY VIEW
-# ========================
 
 class RepHistoryView(discord.ui.View):
     def __init__(self, member, pages, guild, bot, author_id):
@@ -514,61 +361,308 @@ class RepHistoryView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 # ========================
+# BOT SETUP
+# ========================
+
+intents = discord.Intents.default()
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_ready():
+    try:
+        synced = await bot.tree.sync()
+        print(f"Logged in as {bot.user} | Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(f"Command sync failed: {e}")
+        print(f"Logged in as {bot.user}")
+
+# ========================
+# COMMAND ERROR HANDLER
+# ========================
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                f"⏳ Slow down. Try again in **{error.retry_after:.1f} seconds**.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"⏳ Slow down. Try again in **{error.retry_after:.1f} seconds**.",
+                ephemeral=True,
+            )
+        return
+
+    print(f"Unhandled app command error: {error}")
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ Something went wrong while running that command.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Something went wrong while running that command.",
+                ephemeral=True,
+            )
+    except Exception:
+        pass
+
+# ========================
+# COMMANDS
+# ========================
+
+@bot.tree.command(name="rep", description="Give positive reputation")
+@app_commands.checks.cooldown(1, 240)
+async def rep(interaction: discord.Interaction, member: discord.Member):
+    if member.bot or member.id == interaction.user.id:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    await interaction.response.defer()
+
+    try:
+        allowed, remaining_before = can_give_rep(interaction.user.id, member.id)
+        if not allowed:
+            return await interaction.followup.send(
+                f"❌ You have already given {member.mention} reputation "
+                f"**{MAX_REP_PER_TARGET_PER_24H} times in the last 24 hours**.\n"
+                f"Please wait before repping this user again.",
+                ephemeral=True,
+            )
+
+        rep_val, neg_val = add_positive_rep(member.id)
+        log_rep_action(interaction.user.id, member.id)
+
+        used_now = MAX_REP_PER_TARGET_PER_24H - remaining_before + 1
+        left_now = max(0, MAX_REP_PER_TARGET_PER_24H - used_now)
+
+        await interaction.followup.send(
+            f"🎖️ {interaction.user.mention} → {member.mention} **(+Reputation)**\n"
+            f"{compact_stats(rep_val, neg_val)}\n"
+            f"🕒 You have used **{used_now}/{MAX_REP_PER_TARGET_PER_24H}** reps for this user in the last 24 hours "
+            f"({left_now} left)."
+        )
+    except Exception as e:
+        print(f"/rep error: {e}")
+        await interaction.followup.send(
+            "❌ Something went wrong while giving reputation.",
+            ephemeral=True,
+        )
+
+@bot.tree.command(name="norep", description="Give negative reputation (does not remove reputation)")
+@app_commands.checks.cooldown(1, 240)
+async def norep(interaction: discord.Interaction, member: discord.Member):
+    if member.bot or member.id == interaction.user.id:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    await interaction.response.defer()
+
+    try:
+        rep_val, neg_val = add_negative_rep(member.id)
+
+        await interaction.followup.send(
+            f"⚠️ {interaction.user.mention} → {member.mention} **(+Negative Reputation)**\n"
+            f"{compact_stats(rep_val, neg_val)}"
+        )
+    except Exception as e:
+        print(f"/norep error: {e}")
+        await interaction.followup.send(
+            "❌ Something went wrong while giving negative reputation.",
+            ephemeral=True,
+        )
+
+@bot.tree.command(name="setrep", description="Set a member's reputation to a specific value")
+async def setrep(interaction: discord.Interaction, member: discord.Member, reputation: int):
+    if member.bot:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    _, neg_val = get_rep_data(member.id)
+    set_rep_data(member.id, reputation, neg_val)
+
+    rep_val, neg_val = get_rep_data(member.id)
+
+    await interaction.response.send_message(
+        f"🛠️ Reputation set by {interaction.user.mention} → {member.mention}\n"
+        f"{compact_stats(rep_val, neg_val)}"
+    )
+
+@bot.tree.command(name="setnegativerep", description="Set a member's negative reputation to a specific value")
+async def setnegativerep(interaction: discord.Interaction, member: discord.Member, negative_reputation: int):
+    if member.bot:
+        return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
+
+    rep_val, _ = get_rep_data(member.id)
+    set_rep_data(member.id, rep_val, negative_reputation)
+
+    rep_val, neg_val = get_rep_data(member.id)
+
+    await interaction.response.send_message(
+        f"🛠️ Negative Reputation set by {interaction.user.mention} → {member.mention}\n"
+        f"{compact_stats(rep_val, neg_val)}"
+    )
+
+@bot.tree.command(name="checkrep", description="Check reputation status")
+async def checkrep(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    member = member or interaction.user
+    rep_val, neg_val = get_rep_data(member.id)
+
+    await interaction.response.send_message(
+        f"📊 {member.mention}\n"
+        f"{compact_stats(rep_val, neg_val)}"
+    )
+
+@bot.tree.command(name="rephistory", description="View all positive rep history received by a member")
+async def rephistory(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer()
+
+    try:
+        rows = get_received_rep_history(member.id)
+
+        if not rows:
+            return await interaction.followup.send(
+                f"📭 {member.mention} has not received any positive reputation yet.",
+                ephemeral=True,
+            )
+
+        formatted_rows = []
+        for giver_id, receiver_id, given_at in rows:
+            giver_name = await resolve_user_name(interaction.guild, bot, giver_id)
+            formatted_rows.append((giver_name, format_dt(given_at)))
+
+        chunks = [
+            formatted_rows[i:i + REP_HISTORY_PAGE_SIZE]
+            for i in range(0, len(formatted_rows), REP_HISTORY_PAGE_SIZE)
+        ]
+
+        first_table = build_rep_history_table(chunks[0])
+
+        embed = discord.Embed(
+            title=f"📜 Reputation History for {member.display_name}",
+            description=(
+                f"Showing positive reputation received by {member.mention}\n"
+                f"Entries: **{len(formatted_rows)}**"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name=f"Page 1/{len(chunks)}",
+            value=first_table,
+            inline=False,
+        )
+
+        if len(chunks) == 1:
+            return await interaction.followup.send(embed=embed)
+
+        view = RepHistoryView(
+            member=member,
+            pages=chunks,
+            guild=interaction.guild,
+            bot=bot,
+            author_id=interaction.user.id,
+        )
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        print(f"/rephistory error: {e}")
+        await interaction.followup.send(
+            "❌ Something went wrong while loading reputation history.",
+            ephemeral=True,
+        )
+
+@bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
+async def leaderboard(interaction: discord.Interaction):
+    items = get_sorted_rep_items()
+    if not items:
+        return await interaction.response.send_message(
+            "📭 No reputation data yet.", ephemeral=True
+        )
+
+    embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
+    view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+# ========================
 # IMPORT / EXPORT
 # ========================
 
 @bot.tree.command(name="importrep", description="Import reputation from JSON")
 async def importrep(interaction: discord.Interaction, file: discord.Attachment):
-    data = json.loads(await file.read())
+    await interaction.response.defer(ephemeral=True)
 
-    with get_db() as conn:
-        for uid_str, val in data.items():
-            uid = int(uid_str)
+    try:
+        raw = await file.read()
+        data = json.loads(raw)
 
-            if isinstance(val, dict):
-                rep_val = int(val.get("reputation", val.get("rep", 0)))
-                neg_val = int(val.get("negative_reputation", val.get("neg_rep", 0)))
-            else:
-                rep_val = int(val)
-                neg_val = 0
+        if not isinstance(data, dict):
+            return await interaction.followup.send("❌ JSON file must contain an object/dictionary.", ephemeral=True)
 
-            rep_val = max(0, rep_val)
-            neg_val = max(0, neg_val)
+        imported = 0
 
-            conn.execute("""
-            INSERT INTO reputation (user_id, rep, neg_rep, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id)
-            DO UPDATE SET rep = excluded.rep,
-                          neg_rep = excluded.neg_rep,
-                          updated_at = excluded.updated_at
-            """, (uid, rep_val, neg_val, datetime.utcnow().isoformat()))
-        conn.commit()
+        with get_db() as conn:
+            for uid_str, val in data.items():
+                uid = int(uid_str)
 
-    await interaction.response.send_message("✅ Reputation imported.")
+                if isinstance(val, dict):
+                    rep_val = int(val.get("reputation", val.get("rep", 0)))
+                    neg_val = int(val.get("negative_reputation", val.get("neg_rep", 0)))
+                else:
+                    rep_val = int(val)
+                    neg_val = 0
+
+                rep_val = max(0, rep_val)
+                neg_val = max(0, neg_val)
+
+                conn.execute("""
+                INSERT INTO reputation (user_id, rep, neg_rep, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id)
+                DO UPDATE SET rep = excluded.rep,
+                              neg_rep = excluded.neg_rep,
+                              updated_at = excluded.updated_at
+                """, (uid, rep_val, neg_val, utc_now_iso()))
+                imported += 1
+
+            conn.commit()
+
+        await interaction.followup.send(f"✅ Reputation imported for **{imported}** user(s).", ephemeral=True)
+
+    except Exception as e:
+        print(f"/importrep error: {e}")
+        await interaction.followup.send("❌ Failed to import reputation JSON.", ephemeral=True)
 
 @bot.tree.command(name="exportrep", description="Export reputation to JSON")
 async def exportrep(interaction: discord.Interaction):
-    with get_db() as conn:
-        rows = conn.execute("SELECT user_id, rep, neg_rep FROM reputation").fetchall()
+    try:
+        with get_db() as conn:
+            rows = conn.execute("SELECT user_id, rep, neg_rep FROM reputation").fetchall()
 
-    path = "/tmp/rep_export.json"
-    payload = {
-        str(uid): {
-            "reputation": rep,
-            "negative_reputation": neg,
+        path = "/tmp/rep_export.json"
+        payload = {
+            str(uid): {
+                "reputation": rep,
+                "negative_reputation": neg,
+            }
+            for uid, rep, neg in rows
         }
-        for uid, rep, neg in rows
-    }
 
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
 
-    await interaction.response.send_message(
-        "📦 Reputation export:",
-        file=discord.File(path),
-        ephemeral=True,
-    )
+        await interaction.response.send_message(
+            "📦 Reputation export:",
+            file=discord.File(path),
+            ephemeral=True,
+        )
+    except Exception as e:
+        print(f"/exportrep error: {e}")
+        if interaction.response.is_done():
+            await interaction.followup.send("❌ Failed to export reputation.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Failed to export reputation.", ephemeral=True)
 
 # ========================
 # RUN
