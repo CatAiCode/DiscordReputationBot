@@ -1,9 +1,9 @@
 import json
 import math
+import os
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
-import os
 
 import discord
 from discord.ext import commands
@@ -120,13 +120,11 @@ def add_negative_rep(user_id: int, amount: int = 1):
 
 def get_sorted_rep_items():
     with get_db() as conn:
-        return conn.execute(
-            """
+        return conn.execute("""
             SELECT user_id, rep, neg_rep
             FROM reputation
             ORDER BY rep DESC, neg_rep ASC, user_id ASC
-            """
-        ).fetchall()
+        """).fetchall()
 
 def get_rep_count_last_24h(giver_id: int, receiver_id: int) -> int:
     cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
@@ -301,7 +299,6 @@ class LeaderboardView(discord.ui.View):
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
-
 class RepHistoryView(discord.ui.View):
     def __init__(self, member, pages, guild, bot, author_id):
         super().__init__(timeout=120)
@@ -384,16 +381,11 @@ async def on_ready():
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CommandOnCooldown):
+        message = f"⏳ Slow down. Try again in **{error.retry_after:.1f} seconds**."
         if interaction.response.is_done():
-            await interaction.followup.send(
-                f"⏳ Slow down. Try again in **{error.retry_after:.1f} seconds**.",
-                ephemeral=True,
-            )
+            await interaction.followup.send(message, ephemeral=True)
         else:
-            await interaction.response.send_message(
-                f"⏳ Slow down. Try again in **{error.retry_after:.1f} seconds**.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(message, ephemeral=True)
         return
 
     print(f"Unhandled app command error: {error}")
@@ -441,9 +433,10 @@ async def rep(interaction: discord.Interaction, member: discord.Member):
         left_now = max(0, MAX_REP_PER_TARGET_PER_24H - used_now)
 
         await interaction.followup.send(
-            f"🎖️ {interaction.user.mention} → {member.mention} **(+Reputation)**\n"
-            f"{compact_stats(rep_val, neg_val)}\n"
-            f"🕒 You have used **{used_now}/{MAX_REP_PER_TARGET_PER_24H}** reps for this user in the last 24 hours "
+            f"{interaction.user.mention} repped {member.mention}\n"
+            f"👍 {member.mention} now has **{rep_val}** reputation\n"
+            f"🔰 Level: **{get_trading_level(rep_val)}**\n"
+            f"🕒 You have used **{used_now}/{MAX_REP_PER_TARGET_PER_24H}** reps for this user in the last 24 hours, You can give up to 3 rep to the same user every 24 hours "
             f"({left_now} left)."
         )
     except Exception as e:
@@ -465,8 +458,9 @@ async def norep(interaction: discord.Interaction, member: discord.Member):
         rep_val, neg_val = add_negative_rep(member.id)
 
         await interaction.followup.send(
-            f"⚠️ {interaction.user.mention} → {member.mention} **(+Negative Reputation)**\n"
-            f"{compact_stats(rep_val, neg_val)}"
+            f"{interaction.user.mention} gave negative reputation to {member.mention}\n"
+            f"👍 {member.mention} still has **{rep_val}** positive reputation\n"
+            f"👎 {member.mention} now has **{neg_val}** negative reputation"
         )
     except Exception as e:
         print(f"/norep error: {e}")
@@ -578,7 +572,8 @@ async def leaderboard(interaction: discord.Interaction):
     items = get_sorted_rep_items()
     if not items:
         return await interaction.response.send_message(
-            "📭 No reputation data yet.", ephemeral=True
+            "📭 No reputation data yet.",
+            ephemeral=True
         )
 
     embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
@@ -598,7 +593,10 @@ async def importrep(interaction: discord.Interaction, file: discord.Attachment):
         data = json.loads(raw)
 
         if not isinstance(data, dict):
-            return await interaction.followup.send("❌ JSON file must contain an object/dictionary.", ephemeral=True)
+            return await interaction.followup.send(
+                "❌ JSON file must contain an object/dictionary.",
+                ephemeral=True
+            )
 
         imported = 0
 
@@ -628,11 +626,17 @@ async def importrep(interaction: discord.Interaction, file: discord.Attachment):
 
             conn.commit()
 
-        await interaction.followup.send(f"✅ Reputation imported for **{imported}** user(s).", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Reputation imported for **{imported}** user(s).",
+            ephemeral=True
+        )
 
     except Exception as e:
         print(f"/importrep error: {e}")
-        await interaction.followup.send("❌ Failed to import reputation JSON.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ Failed to import reputation JSON.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="exportrep", description="Export reputation to JSON")
 async def exportrep(interaction: discord.Interaction):
