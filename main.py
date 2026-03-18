@@ -1,7 +1,7 @@
 import json
 import math
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 import os
 
@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 PAGE_SIZE = 10
 DB_PATH = "/data/reputation.db"
 REP_PER_LEVEL = 20  # uncapped levels
+MAX_REP_PER_TARGET_PER_24H = 3
+REP_HISTORY_PAGE_SIZE = 15
 
 RANK_EMOJIS = {
     1: "🥇",
@@ -57,6 +59,16 @@ def init_db():
                 "ALTER TABLE reputation ADD COLUMN neg_rep INTEGER NOT NULL DEFAULT 0"
             )
             conn.commit()
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS rep_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            giver_id INTEGER NOT NULL,
+            receiver_id INTEGER NOT NULL,
+            given_at TEXT NOT NULL
+        )
+        """)
+        conn.commit()
 
 init_db()
 
@@ -105,6 +117,39 @@ def get_sorted_rep_items():
             "SELECT user_id, rep, neg_rep FROM reputation ORDER BY rep DESC, neg_rep ASC"
         ).fetchall()
 
+def get_rep_count_last_24h(giver_id: int, receiver_id: int) -> int:
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT COUNT(*)
+            FROM rep_history
+            WHERE giver_id = ? AND receiver_id = ? AND given_at >= ?
+        """, (giver_id, receiver_id, cutoff)).fetchone()
+    return row[0] if row else 0
+
+def log_rep_action(giver_id: int, receiver_id: int):
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO rep_history (giver_id, receiver_id, given_at)
+            VALUES (?, ?, ?)
+        """, (giver_id, receiver_id, datetime.utcnow().isoformat()))
+        conn.commit()
+
+def can_give_rep(giver_id: int, receiver_id: int) -> tuple[bool, int]:
+    used = get_rep_count_last_24h(giver_id, receiver_id)
+    remaining = max(0, MAX_REP_PER_TARGET_PER_24H - used)
+    return used < MAX_REP_PER_TARGET_PER_24H, remaining
+
+def get_received_rep_history(receiver_id: int):
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT giver_id, receiver_id, given_at
+            FROM rep_history
+            WHERE receiver_id = ?
+            ORDER BY given_at DESC
+        """, (receiver_id,)).fetchall()
+    return rows
+
 # ========================
 # UTILITIES
 # ========================
@@ -112,13 +157,42 @@ def get_sorted_rep_items():
 def get_trading_level(rep: int) -> int:
     return rep // REP_PER_LEVEL
 
-# 🔥 UPDATED — negative rep removed from display
 def compact_stats(rep: int, neg: int) -> str:
     level = get_trading_level(rep)
     return (
         f"👍 **{rep} Reputation** • "
         f"🔰 **Lv. {level}**"
     )
+
+def format_dt(dt_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except:
+        return dt_str
+
+async def resolve_user_name(guild: discord.Guild, bot: commands.Bot, user_id: int) -> str:
+    member = guild.get_member(user_id) if guild else None
+    if member:
+        return member.display_name
+
+    try:
+        user = await bot.fetch_user(user_id)
+        return user.name
+    except:
+        return f"User {user_id}"
+
+def build_rep_history_table(rows):
+    lines = []
+    lines.append(f"{'#':<4} {'From':<24} {'Date / Time':<20}")
+    lines.append("-" * 52)
+
+    for idx, (giver_name, given_at) in enumerate(rows, start=1):
+        short_name = giver_name[:24]
+        short_time = given_at[:20]
+        lines.append(f"{idx:<4} {short_name:<24} {short_time:<20}")
+
+    return "```" + "\n".join(lines) + "```"
 
 # ========================
 # LEADERBOARD EMBED
@@ -242,11 +316,26 @@ async def rep(interaction: discord.Interaction, member: discord.Member):
     if member.bot or member.id == interaction.user.id:
         return await interaction.response.send_message("❌ Invalid target.", ephemeral=True)
 
+    allowed, remaining = can_give_rep(interaction.user.id, member.id)
+    if not allowed:
+        return await interaction.response.send_message(
+            f"❌ You have already given {member.mention} reputation "
+            f"**{MAX_REP_PER_TARGET_PER_24H} times in the last 24 hours**.\n"
+            f"Please wait before repping this user again.",
+            ephemeral=True,
+        )
+
     rep_val, neg_val = add_positive_rep(member.id)
+    log_rep_action(interaction.user.id, member.id)
+
+    used_now = get_rep_count_last_24h(interaction.user.id, member.id)
+    left_now = max(0, MAX_REP_PER_TARGET_PER_24H - used_now)
 
     await interaction.response.send_message(
         f"🎖️ {interaction.user.mention} → {member.mention} **(+Reputation)**\n"
-        f"{compact_stats(rep_val, neg_val)}"
+        f"{compact_stats(rep_val, neg_val)}\n"
+        f"🕒 You have used **{used_now}/{MAX_REP_PER_TARGET_PER_24H}** reps for this user in the last 24 hours "
+        f"({left_now} left)."
     )
 
 @bot.tree.command(name="norep", description="Give negative reputation (does not remove reputation)")
@@ -302,6 +391,54 @@ async def checkrep(interaction: discord.Interaction, member: Optional[discord.Me
         f"{compact_stats(rep_val, neg_val)}"
     )
 
+@bot.tree.command(name="rephistory", description="View all positive rep history received by a member")
+async def rephistory(interaction: discord.Interaction, member: discord.Member):
+    rows = get_received_rep_history(member.id)
+
+    if not rows:
+        return await interaction.response.send_message(
+            f"📭 {member.mention} has not received any positive reputation yet.",
+            ephemeral=True,
+        )
+
+    formatted_rows = []
+    for giver_id, receiver_id, given_at in rows:
+        giver_name = await resolve_user_name(interaction.guild, bot, giver_id)
+        formatted_rows.append((giver_name, format_dt(given_at)))
+
+    chunks = [
+        formatted_rows[i:i + REP_HISTORY_PAGE_SIZE]
+        for i in range(0, len(formatted_rows), REP_HISTORY_PAGE_SIZE)
+    ]
+
+    first_table = build_rep_history_table(chunks[0])
+
+    embed = discord.Embed(
+        title=f"📜 Reputation History for {member.display_name}",
+        description=(
+            f"Showing positive reputation received by {member.mention}\n"
+            f"Entries: **{len(formatted_rows)}**"
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name=f"Page 1/{len(chunks)}",
+        value=first_table,
+        inline=False,
+    )
+
+    if len(chunks) == 1:
+        return await interaction.response.send_message(embed=embed)
+
+    view = RepHistoryView(
+        member=member,
+        pages=chunks,
+        guild=interaction.guild,
+        bot=bot,
+        author_id=interaction.user.id,
+    )
+    await interaction.response.send_message(embed=embed, view=view)
+
 @bot.tree.command(name="leaderboard", description="View the reputation leaderboard")
 async def leaderboard(interaction: discord.Interaction):
     items = get_sorted_rep_items()
@@ -313,6 +450,68 @@ async def leaderboard(interaction: discord.Interaction):
     embed = await make_leaderboard_embed(items, 0, interaction.guild, bot, interaction.user.id)
     view = LeaderboardView(items, interaction.guild, bot, interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view)
+
+# ========================
+# REP HISTORY VIEW
+# ========================
+
+class RepHistoryView(discord.ui.View):
+    def __init__(self, member, pages, guild, bot, author_id):
+        super().__init__(timeout=120)
+        self.member = member
+        self.pages = pages
+        self.guild = guild
+        self.bot = bot
+        self.author_id = author_id
+        self.page = 0
+        self.max_pages = len(pages)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous.disabled = self.page <= 0
+        self.next.disabled = self.page >= self.max_pages - 1
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ You can’t control someone else’s history viewer.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def make_embed(self):
+        page_rows = self.pages[self.page]
+        table = build_rep_history_table(page_rows)
+
+        embed = discord.Embed(
+            title=f"📜 Reputation History for {self.member.display_name}",
+            description=(
+                f"Showing positive reputation received by {self.member.mention}\n"
+                f"Entries: **{sum(len(p) for p in self.pages)}**"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name=f"Page {self.page + 1}/{self.max_pages}",
+            value=table,
+            inline=False,
+        )
+        return embed
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self.update_buttons()
+        embed = await self.make_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self.update_buttons()
+        embed = await self.make_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
 
 # ========================
 # IMPORT / EXPORT
